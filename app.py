@@ -169,66 +169,107 @@ def init_connection():
 # Initialize DB tables if they don't exist
 def init_db():
     with engine.connect() as conn:
-        conn.execute(text('''
-        -- Create companies table
-        CREATE TABLE IF NOT EXISTS companies (
-            id SERIAL PRIMARY KEY,
-            username VARCHAR(50) UNIQUE NOT NULL,
-            password VARCHAR(255) NOT NULL,
-            company_name VARCHAR(100) NOT NULL,
-            profile_pic_url TEXT,
-            is_active BOOLEAN DEFAULT TRUE,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-        
-        -- Create branches table
-        CREATE TABLE IF NOT EXISTS branches (
-            id SERIAL PRIMARY KEY,
-            company_id INTEGER REFERENCES companies(id),
-            branch_name VARCHAR(100) NOT NULL,
-            location VARCHAR(100),
-            is_active BOOLEAN DEFAULT TRUE,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-        
-        -- Create company_messages table
-        CREATE TABLE IF NOT EXISTS company_messages (
-            id SERIAL PRIMARY KEY,
-            company_id INTEGER REFERENCES companies(id),
-            message_text TEXT NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            is_read BOOLEAN DEFAULT FALSE
-        );
-        
-        -- Create employees table with branch_id
-        CREATE TABLE IF NOT EXISTS employees (
-            id SERIAL PRIMARY KEY,
-            username VARCHAR(50) UNIQUE NOT NULL,
-            password VARCHAR(255) NOT NULL,
-            full_name VARCHAR(100) NOT NULL,
-            profile_pic_url TEXT,
-            is_active BOOLEAN DEFAULT TRUE,
-            branch_id INTEGER REFERENCES branches(id)
-        );
-        
-        CREATE TABLE IF NOT EXISTS daily_reports (
-            id SERIAL PRIMARY KEY,
-            employee_id INTEGER REFERENCES employees(id),
-            report_date DATE NOT NULL,
-            report_text TEXT NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-        
-        CREATE TABLE IF NOT EXISTS tasks (
-            id SERIAL PRIMARY KEY,
-            employee_id INTEGER REFERENCES employees(id),
-            task_description TEXT NOT NULL,
-            due_date DATE,
-            is_completed BOOLEAN DEFAULT FALSE,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-        '''))
-        conn.commit()
+        try:
+            # Execute schema creation statements one by one with error handling
+            try:
+                # Create companies table
+                conn.execute(text('''
+                CREATE TABLE IF NOT EXISTS companies (
+                    id SERIAL PRIMARY KEY,
+                    username VARCHAR(50) UNIQUE NOT NULL,
+                    password VARCHAR(255) NOT NULL,
+                    company_name VARCHAR(100) NOT NULL,
+                    profile_pic_url TEXT,
+                    is_active BOOLEAN DEFAULT TRUE,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                '''))
+                conn.commit()
+            except Exception as e:
+                st.error(f"Error creating companies table: {str(e)}")
+            
+            try:
+                # Create branches table
+                conn.execute(text('''
+                CREATE TABLE IF NOT EXISTS branches (
+                    id SERIAL PRIMARY KEY,
+                    company_id INTEGER REFERENCES companies(id),
+                    branch_name VARCHAR(100) NOT NULL,
+                    location VARCHAR(100),
+                    is_active BOOLEAN DEFAULT TRUE,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                '''))
+                conn.commit()
+            except Exception as e:
+                st.error(f"Error creating branches table: {str(e)}")
+            
+            try:
+                # Create company_messages table
+                conn.execute(text('''
+                CREATE TABLE IF NOT EXISTS company_messages (
+                    id SERIAL PRIMARY KEY,
+                    company_id INTEGER REFERENCES companies(id),
+                    message_text TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    is_read BOOLEAN DEFAULT FALSE
+                )
+                '''))
+                conn.commit()
+            except Exception as e:
+                st.error(f"Error creating company_messages table: {str(e)}")
+            
+            try:
+                # Create employees table with branch_id
+                conn.execute(text('''
+                CREATE TABLE IF NOT EXISTS employees (
+                    id SERIAL PRIMARY KEY,
+                    username VARCHAR(50) UNIQUE NOT NULL,
+                    password VARCHAR(255) NOT NULL,
+                    full_name VARCHAR(100) NOT NULL,
+                    profile_pic_url TEXT,
+                    is_active BOOLEAN DEFAULT TRUE,
+                    branch_id INTEGER REFERENCES branches(id),
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                '''))
+                conn.commit()
+            except Exception as e:
+                st.error(f"Error creating employees table: {str(e)}")
+            
+            try:
+                # Create daily_reports table
+                conn.execute(text('''
+                CREATE TABLE IF NOT EXISTS daily_reports (
+                    id SERIAL PRIMARY KEY,
+                    employee_id INTEGER REFERENCES employees(id),
+                    report_date DATE NOT NULL,
+                    report_text TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                '''))
+                conn.commit()
+            except Exception as e:
+                st.error(f"Error creating daily_reports table: {str(e)}")
+            
+            try:
+                # Create tasks table
+                conn.execute(text('''
+                CREATE TABLE IF NOT EXISTS tasks (
+                    id SERIAL PRIMARY KEY,
+                    employee_id INTEGER REFERENCES employees(id),
+                    task_description TEXT NOT NULL,
+                    due_date DATE,
+                    is_completed BOOLEAN DEFAULT FALSE,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                '''))
+                conn.commit()
+            except Exception as e:
+                st.error(f"Error creating tasks table: {str(e)}")
+                
+        except Exception as e:
+            st.error(f"Database initialization error: {str(e)}")
 
 # Authentication function
 def authenticate(username, password):
@@ -974,57 +1015,101 @@ def display_company_dashboard():
     
     company_id = st.session_state.user["id"]
     
-    # Statistics
+    # Check if tables exist before querying
     with engine.connect() as conn:
-        # Total branches
-        result = conn.execute(text('SELECT COUNT(*) FROM branches WHERE company_id = :company_id AND is_active = TRUE'), 
-                             {'company_id': company_id})
-        total_branches = result.fetchone()[0]
-        
-        # Total employees
-        result = conn.execute(text('''
-        SELECT COUNT(*) FROM employees e
-        JOIN branches b ON e.branch_id = b.id
-        WHERE b.company_id = :company_id AND e.is_active = TRUE
-        '''), {'company_id': company_id})
-        total_employees = result.fetchone()[0]
-        
-        # Total reports
-        result = conn.execute(text('''
-        SELECT COUNT(*) FROM daily_reports dr
-        JOIN employees e ON dr.employee_id = e.id
-        JOIN branches b ON e.branch_id = b.id
-        WHERE b.company_id = :company_id
-        '''), {'company_id': company_id})
-        total_reports = result.fetchone()[0]
-        
-        # Unread messages
-        result = conn.execute(text('''
-        SELECT COUNT(*) FROM company_messages
-        WHERE company_id = :company_id AND is_read = FALSE
-        '''), {'company_id': company_id})
-        unread_messages = result.fetchone()[0]
-        
-        # Recent branches
-        result = conn.execute(text('''
-        SELECT branch_name, location, created_at, is_active
-        FROM branches
-        WHERE company_id = :company_id
-        ORDER BY created_at DESC
-        LIMIT 5
-        '''), {'company_id': company_id})
-        recent_branches = result.fetchall()
-        
-        # Recent employees
-        result = conn.execute(text('''
-        SELECT e.full_name, b.branch_name, e.created_at, e.is_active
-        FROM employees e
-        JOIN branches b ON e.branch_id = b.id
-        WHERE b.company_id = :company_id
-        ORDER BY e.created_at DESC
-        LIMIT 5
-        '''), {'company_id': company_id})
-        recent_employees = result.fetchall()
+        try:
+            # Check if branches table exists
+            result = conn.execute(text("SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'branches')"))
+            branches_exists = result.fetchone()[0]
+            
+            # Check if employees table exists
+            result = conn.execute(text("SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'employees')"))
+            employees_exists = result.fetchone()[0]
+            
+            # Check if daily_reports table exists
+            result = conn.execute(text("SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'daily_reports')"))
+            reports_exists = result.fetchone()[0]
+            
+            # Check if company_messages table exists
+            result = conn.execute(text("SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'company_messages')"))
+            messages_exists = result.fetchone()[0]
+            
+            # Statistics
+            # Total branches
+            if branches_exists:
+                result = conn.execute(text('SELECT COUNT(*) FROM branches WHERE company_id = :company_id AND is_active = TRUE'), 
+                                   {'company_id': company_id})
+                total_branches = result.fetchone()[0]
+            else:
+                total_branches = 0
+            
+            # Total employees
+            if branches_exists and employees_exists:
+                result = conn.execute(text('''
+                SELECT COUNT(*) FROM employees e
+                JOIN branches b ON e.branch_id = b.id
+                WHERE b.company_id = :company_id AND e.is_active = TRUE
+                '''), {'company_id': company_id})
+                total_employees = result.fetchone()[0]
+            else:
+                total_employees = 0
+            
+            # Total reports
+            if branches_exists and employees_exists and reports_exists:
+                result = conn.execute(text('''
+                SELECT COUNT(*) FROM daily_reports dr
+                JOIN employees e ON dr.employee_id = e.id
+                JOIN branches b ON e.branch_id = b.id
+                WHERE b.company_id = :company_id
+                '''), {'company_id': company_id})
+                total_reports = result.fetchone()[0]
+            else:
+                total_reports = 0
+            
+            # Unread messages
+            if messages_exists:
+                result = conn.execute(text('''
+                SELECT COUNT(*) FROM company_messages
+                WHERE company_id = :company_id AND is_read = FALSE
+                '''), {'company_id': company_id})
+                unread_messages = result.fetchone()[0]
+            else:
+                unread_messages = 0
+            
+            # Recent branches
+            if branches_exists:
+                result = conn.execute(text('''
+                SELECT branch_name, location, created_at, is_active
+                FROM branches
+                WHERE company_id = :company_id
+                ORDER BY created_at DESC
+                LIMIT 5
+                '''), {'company_id': company_id})
+                recent_branches = result.fetchall()
+            else:
+                recent_branches = []
+            
+            # Recent employees
+            if branches_exists and employees_exists:
+                result = conn.execute(text('''
+                SELECT e.full_name, b.branch_name, e.created_at, e.is_active
+                FROM employees e
+                JOIN branches b ON e.branch_id = b.id
+                WHERE b.company_id = :company_id
+                ORDER BY e.created_at DESC
+                LIMIT 5
+                '''), {'company_id': company_id})
+                recent_employees = result.fetchall()
+            else:
+                recent_employees = []
+        except Exception as e:
+            st.error(f"Error retrieving dashboard data: {str(e)}")
+            total_branches = 0
+            total_employees = 0
+            total_reports = 0
+            unread_messages = 0
+            recent_branches = []
+            recent_employees = []
     
     # Display statistics
     col1, col2, col3, col4 = st.columns(4)
