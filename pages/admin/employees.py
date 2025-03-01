@@ -1,4 +1,5 @@
 import streamlit as st
+from sqlalchemy import text
 from database.models import EmployeeModel
 
 def manage_employees(engine):
@@ -90,8 +91,8 @@ def add_new_employee(engine):
             else:
                 # Check if username already exists
                 with engine.connect() as conn:
-                    result = conn.execute(conn.execute(text('SELECT COUNT(*) FROM employees WHERE username = :username'), 
-                                          {'username': username}))
+                    result = conn.execute(text('SELECT COUNT(*) FROM employees WHERE username = :username'), 
+                                          {'username': username})
                     count = result.fetchone()[0]
                     
                     if count > 0:
