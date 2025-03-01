@@ -26,21 +26,53 @@ def authenticate(engine, username, password):
             "id": 0,  # Special ID for admin
             "username": username, 
             "full_name": "Administrator", 
-            "is_admin": True, 
+            "user_type": "admin",
             "profile_pic_url": "https://www.gravatar.com/avatar/00000000000000000000000000000000?d=mp&f=y"
         }
     
-    # If not admin, check employee credentials in database
+    # If not admin, check company credentials
     with engine.connect() as conn:
         result = conn.execute(text('''
-        SELECT id, username, full_name, profile_pic_url
-        FROM employees
+        SELECT id, company_name, username, profile_pic_url
+        FROM companies
         WHERE username = :username AND password = :password AND is_active = TRUE
         '''), {'username': username, 'password': password})
-        user = result.fetchone()
+        company = result.fetchone()
     
-    if user:
-        return {"id": user[0], "username": user[1], "full_name": user[2], "is_admin": False, "profile_pic_url": user[3]}
+    if company:
+        return {
+            "id": company[0], 
+            "username": company[2], 
+            "full_name": company[1], 
+            "user_type": "company",
+            "profile_pic_url": company[3]
+        }
+    
+    # If not company, check employee credentials
+    with engine.connect() as conn:
+        result = conn.execute(text('''
+        SELECT e.id, e.username, e.full_name, e.profile_pic_url, b.id as branch_id, b.branch_name, c.id as company_id, c.company_name
+        FROM employees e
+        JOIN branches b ON e.branch_id = b.id
+        JOIN companies c ON b.company_id = c.id
+        WHERE e.username = :username AND e.password = :password 
+          AND e.is_active = TRUE AND b.is_active = TRUE AND c.is_active = TRUE
+        '''), {'username': username, 'password': password})
+        employee = result.fetchone()
+    
+    if employee:
+        return {
+            "id": employee[0], 
+            "username": employee[1], 
+            "full_name": employee[2],
+            "user_type": "employee",
+            "profile_pic_url": employee[3],
+            "branch_id": employee[4],
+            "branch_name": employee[5],
+            "company_id": employee[6],
+            "company_name": employee[7]
+        }
+    
     return None
 
 def logout():
