@@ -189,14 +189,17 @@ def init_db():
                 st.error(f"Error creating companies table: {str(e)}")
             
             try:
-                # Create branches table
+                # Create branches table with parent_branch_id for hierarchy
                 conn.execute(text('''
                 CREATE TABLE IF NOT EXISTS branches (
                     id SERIAL PRIMARY KEY,
                     company_id INTEGER REFERENCES companies(id),
                     branch_name VARCHAR(100) NOT NULL,
+                    branch_type VARCHAR(50) DEFAULT 'Branch',
+                    parent_branch_id INTEGER REFERENCES branches(id) NULL,
                     location VARCHAR(100),
                     is_active BOOLEAN DEFAULT TRUE,
+                    is_main BOOLEAN DEFAULT FALSE,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
                 '''))
@@ -220,7 +223,7 @@ def init_db():
                 st.error(f"Error creating company_messages table: {str(e)}")
             
             try:
-                # Create employees table with branch_id
+                # Create employees table with branch_id and role
                 conn.execute(text('''
                 CREATE TABLE IF NOT EXISTS employees (
                     id SERIAL PRIMARY KEY,
@@ -230,6 +233,7 @@ def init_db():
                     profile_pic_url TEXT,
                     is_active BOOLEAN DEFAULT TRUE,
                     branch_id INTEGER REFERENCES branches(id),
+                    role VARCHAR(50) DEFAULT 'General Employee',
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
                 '''))
@@ -253,20 +257,38 @@ def init_db():
                 st.error(f"Error creating daily_reports table: {str(e)}")
             
             try:
-                # Create tasks table
+                # Create tasks table with branch assignment
                 conn.execute(text('''
                 CREATE TABLE IF NOT EXISTS tasks (
                     id SERIAL PRIMARY KEY,
-                    employee_id INTEGER REFERENCES employees(id),
+                    branch_id INTEGER REFERENCES branches(id) NULL,
+                    employee_id INTEGER REFERENCES employees(id) NULL,
                     task_description TEXT NOT NULL,
                     due_date DATE,
                     is_completed BOOLEAN DEFAULT FALSE,
+                    completed_by_id INTEGER REFERENCES employees(id) NULL,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
                 '''))
                 conn.commit()
             except Exception as e:
                 st.error(f"Error creating tasks table: {str(e)}")
+                
+            try:
+                # Create task_assignments table for tracking individual employee task completion
+                conn.execute(text('''
+                CREATE TABLE IF NOT EXISTS task_assignments (
+                    id SERIAL PRIMARY KEY,
+                    task_id INTEGER REFERENCES tasks(id),
+                    employee_id INTEGER REFERENCES employees(id),
+                    is_completed BOOLEAN DEFAULT FALSE,
+                    completed_at TIMESTAMP,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                '''))
+                conn.commit()
+            except Exception as e:
+                st.error(f"Error creating task_assignments table: {str(e)}")
                 
         except Exception as e:
             st.error(f"Database initialization error: {str(e)}")
@@ -981,8 +1003,8 @@ def company_dashboard():
     # Navigation
     selected = option_menu(
         menu_title=None,
-        options=["Dashboard", "Branches", "Employees", "Reports", "Messages", "Profile", "Logout"],
-        icons=["house", "building", "people", "clipboard-data", "envelope", "person-circle", "box-arrow-right"],
+        options=["Dashboard", "Branches", "Employees", "Tasks", "Task Tracking", "Reports", "Messages", "Profile", "Logout"],
+        icons=["house", "building", "people", "list-task", "kanban", "clipboard-data", "envelope", "person-circle", "box-arrow-right"],
         menu_icon="cast",
         default_index=0,
         orientation="horizontal",
@@ -1000,6 +1022,10 @@ def company_dashboard():
         manage_branches()
     elif selected == "Employees":
         manage_company_employees()
+    elif selected == "Tasks":
+        manage_company_tasks()
+    elif selected == "Task Tracking":
+        view_task_tracking()
     elif selected == "Reports":
         view_company_reports()
     elif selected == "Messages":
@@ -1034,24 +1060,49 @@ def display_company_dashboard():
             result = conn.execute(text("SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'company_messages')"))
             messages_exists = result.fetchone()[0]
             
+            # Check if tasks table exists
+            result = conn.execute(text("SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'tasks')"))
+            tasks_exists = result.fetchone()[0]
+            
             # Statistics
             # Total branches
             if branches_exists:
-                result = conn.execute(text('SELECT COUNT(*) FROM branches WHERE company_id = :company_id AND is_active = TRUE'), 
-                                   {'company_id': company_id})
-                total_branches = result.fetchone()[0]
+                result = conn.execute(text('''
+                SELECT 
+                    (SELECT COUNT(*) FROM branches WHERE company_id = :company_id AND is_active = TRUE AND branch_type = 'Branch') as branch_count,
+                    (SELECT COUNT(*) FROM branches WHERE company_id = :company_id AND is_active = TRUE AND branch_type = 'Sub-Branch') as sub_branch_count,
+                    (SELECT COUNT(*) FROM branches WHERE company_id = :company_id AND is_active = TRUE) as total_branch_count
+                '''), {'company_id': company_id})
+                branch_counts = result.fetchone()
+                branch_count = branch_counts[0]
+                sub_branch_count = branch_counts[1]
+                total_branches = branch_counts[2]
             else:
+                branch_count = 0
+                sub_branch_count = 0
                 total_branches = 0
             
-            # Total employees
+            # Total employees by role
             if branches_exists and employees_exists:
                 result = conn.execute(text('''
-                SELECT COUNT(*) FROM employees e
+                SELECT role, COUNT(*) 
+                FROM employees e
                 JOIN branches b ON e.branch_id = b.id
                 WHERE b.company_id = :company_id AND e.is_active = TRUE
+                GROUP BY role
                 '''), {'company_id': company_id})
-                total_employees = result.fetchone()[0]
+                role_counts = {}
+                for row in result.fetchall():
+                    role_counts[row[0]] = row[1]
+                
+                manager_count = role_counts.get('Manager', 0)
+                asst_manager_count = role_counts.get('Asst. Manager', 0)
+                employee_count = role_counts.get('General Employee', 0)
+                total_employees = manager_count + asst_manager_count + employee_count
             else:
+                manager_count = 0
+                asst_manager_count = 0
+                employee_count = 0
                 total_employees = 0
             
             # Total reports
@@ -1063,8 +1114,55 @@ def display_company_dashboard():
                 WHERE b.company_id = :company_id
                 '''), {'company_id': company_id})
                 total_reports = result.fetchone()[0]
+                
+                # Reports in last 30 days
+                today = datetime.date.today()
+                month_ago = today - datetime.timedelta(days=30)
+                result = conn.execute(text('''
+                SELECT COUNT(*) FROM daily_reports dr
+                JOIN employees e ON dr.employee_id = e.id
+                JOIN branches b ON e.branch_id = b.id
+                WHERE b.company_id = :company_id AND dr.report_date >= :month_ago
+                '''), {'company_id': company_id, 'month_ago': month_ago})
+                recent_reports = result.fetchone()[0]
             else:
                 total_reports = 0
+                recent_reports = 0
+            
+            # Task statistics
+            if tasks_exists:
+                result = conn.execute(text('''
+                SELECT 
+                    (SELECT COUNT(*) FROM tasks t 
+                     JOIN branches b ON t.branch_id = b.id 
+                     WHERE b.company_id = :company_id AND t.employee_id IS NULL) as branch_tasks,
+                    (SELECT COUNT(*) FROM tasks t 
+                     JOIN employees e ON t.employee_id = e.id
+                     JOIN branches b ON e.branch_id = b.id
+                     WHERE b.company_id = :company_id) as individual_tasks,
+                    (SELECT COUNT(*) FROM tasks t 
+                     LEFT JOIN branches b ON t.branch_id = b.id 
+                     LEFT JOIN employees e ON t.employee_id = e.id
+                     LEFT JOIN branches b2 ON e.branch_id = b2.id
+                     WHERE (b.company_id = :company_id OR b2.company_id = :company_id) AND t.is_completed = TRUE) as completed_tasks,
+                    (SELECT COUNT(*) FROM tasks t 
+                     LEFT JOIN branches b ON t.branch_id = b.id 
+                     LEFT JOIN employees e ON t.employee_id = e.id
+                     LEFT JOIN branches b2 ON e.branch_id = b2.id
+                     WHERE (b.company_id = :company_id OR b2.company_id = :company_id)) as total_tasks
+                '''), {'company_id': company_id})
+                task_counts = result.fetchone()
+                branch_tasks = task_counts[0]
+                individual_tasks = task_counts[1]
+                completed_tasks = task_counts[2]
+                total_tasks = task_counts[3]
+                completion_rate = 0 if total_tasks == 0 else round((completed_tasks / total_tasks) * 100)
+            else:
+                branch_tasks = 0
+                individual_tasks = 0
+                completed_tasks = 0
+                total_tasks = 0
+                completion_rate = 0
             
             # Unread messages
             if messages_exists:
@@ -1079,7 +1177,7 @@ def display_company_dashboard():
             # Recent branches
             if branches_exists:
                 result = conn.execute(text('''
-                SELECT branch_name, location, created_at, is_active
+                SELECT branch_name, branch_type, location, created_at, is_active
                 FROM branches
                 WHERE company_id = :company_id
                 ORDER BY created_at DESC
@@ -1092,7 +1190,7 @@ def display_company_dashboard():
             # Recent employees
             if branches_exists and employees_exists:
                 result = conn.execute(text('''
-                SELECT e.full_name, b.branch_name, e.created_at, e.is_active
+                SELECT e.full_name, e.role, b.branch_name, e.created_at, e.is_active
                 FROM employees e
                 JOIN branches b ON e.branch_id = b.id
                 WHERE b.company_id = :company_id
@@ -1102,14 +1200,230 @@ def display_company_dashboard():
                 recent_employees = result.fetchall()
             else:
                 recent_employees = []
+                
+            # Recent tasks with completion status
+            if tasks_exists:
+                result = conn.execute(text('''
+                SELECT t.task_description, t.due_date, t.is_completed, 
+                       CASE WHEN t.employee_id IS NULL THEN b.branch_name ELSE e.full_name END as assigned_to,
+                       CASE WHEN t.employee_id IS NULL THEN 'Branch' ELSE 'Individual' END as assignment_type,
+                       t.created_at
+                FROM tasks t
+                LEFT JOIN branches b ON t.branch_id = b.id
+                LEFT JOIN employees e ON t.employee_id = e.id
+                LEFT JOIN branches b2 ON e.branch_id = b2.id
+                WHERE (b.company_id = :company_id OR b2.company_id = :company_id)
+                ORDER BY t.created_at DESC
+                LIMIT 5
+                '''), {'company_id': company_id})
+                recent_tasks = result.fetchall()
+            else:
+                recent_tasks = []
+                
         except Exception as e:
             st.error(f"Error retrieving dashboard data: {str(e)}")
+            branch_count = 0
+            sub_branch_count = 0
             total_branches = 0
+            manager_count = 0
+            asst_manager_count = 0
+            employee_count = 0
             total_employees = 0
             total_reports = 0
+            recent_reports = 0
+            branch_tasks = 0
+            individual_tasks = 0
+            completed_tasks = 0
+            total_tasks = 0
+            completion_rate = 0
             unread_messages = 0
             recent_branches = []
             recent_employees = []
+            recent_tasks = []
+    
+    # Display statistics in an organized dashboard
+    st.markdown('<div class="card">', unsafe_allow_html=True)
+    
+    # Branch statistics
+    st.markdown('<h3>Branch Statistics</h3>', unsafe_allow_html=True)
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.markdown('<div class="stat-card">', unsafe_allow_html=True)
+        st.markdown(f'<div class="stat-value">{branch_count}</div>', unsafe_allow_html=True)
+        st.markdown('<div class="stat-label">Branches</div>', unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
+    
+    with col2:
+        st.markdown('<div class="stat-card">', unsafe_allow_html=True)
+        st.markdown(f'<div class="stat-value">{sub_branch_count}</div>', unsafe_allow_html=True)
+        st.markdown('<div class="stat-label">Sub-Branches</div>', unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
+    
+    with col3:
+        st.markdown('<div class="stat-card">', unsafe_allow_html=True)
+        st.markdown(f'<div class="stat-value">{total_branches}</div>', unsafe_allow_html=True)
+        st.markdown('<div class="stat-label">Total Branches</div>', unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
+    
+    # Employee statistics
+    st.markdown('<h3>Employee Statistics</h3>', unsafe_allow_html=True)
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        st.markdown('<div class="stat-card">', unsafe_allow_html=True)
+        st.markdown(f'<div class="stat-value">{manager_count}</div>', unsafe_allow_html=True)
+        st.markdown('<div class="stat-label">Managers</div>', unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
+    
+    with col2:
+        st.markdown('<div class="stat-card">', unsafe_allow_html=True)
+        st.markdown(f'<div class="stat-value">{asst_manager_count}</div>', unsafe_allow_html=True)
+        st.markdown('<div class="stat-label">Asst. Managers</div>', unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
+    
+    with col3:
+        st.markdown('<div class="stat-card">', unsafe_allow_html=True)
+        st.markdown(f'<div class="stat-value">{employee_count}</div>', unsafe_allow_html=True)
+        st.markdown('<div class="stat-label">General Employees</div>', unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
+    
+    with col4:
+        st.markdown('<div class="stat-card">', unsafe_allow_html=True)
+        st.markdown(f'<div class="stat-value">{total_employees}</div>', unsafe_allow_html=True)
+        st.markdown('<div class="stat-label">Total Employees</div>', unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
+    
+    # Task and report statistics
+    st.markdown('<h3>Activity Statistics</h3>', unsafe_allow_html=True)
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        st.markdown('<div class="stat-card">', unsafe_allow_html=True)
+        st.markdown(f'<div class="stat-value">{total_tasks}</div>', unsafe_allow_html=True)
+        st.markdown('<div class="stat-label">Total Tasks</div>', unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
+    
+    with col2:
+        st.markdown('<div class="stat-card">', unsafe_allow_html=True)
+        st.markdown(f'<div class="stat-value">{completion_rate}%</div>', unsafe_allow_html=True)
+        st.markdown('<div class="stat-label">Task Completion Rate</div>', unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
+    
+    with col3:
+        st.markdown('<div class="stat-card">', unsafe_allow_html=True)
+        st.markdown(f'<div class="stat-value">{total_reports}</div>', unsafe_allow_html=True)
+        st.markdown('<div class="stat-label">Total Reports</div>', unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
+    
+    with col4:
+        st.markdown('<div class="stat-card">', unsafe_allow_html=True)
+        st.markdown(f'<div class="stat-value">{unread_messages}</div>', unsafe_allow_html=True)
+        st.markdown('<div class="stat-label">Unread Messages</div>', unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
+    
+    st.markdown('</div>', unsafe_allow_html=True)
+    
+    # Display task analytics
+    if total_tasks > 0:
+        st.markdown('<h3 class="sub-header">Task Analytics</h3>', unsafe_allow_html=True)
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            # Task distribution chart
+            st.markdown('<div class="card">', unsafe_allow_html=True)
+            st.markdown('<h4>Task Distribution</h4>', unsafe_allow_html=True)
+            
+            # Data for pie chart
+            labels = ['Branch Tasks', 'Individual Tasks']
+            values = [branch_tasks, individual_tasks]
+            
+            # Plot using Plotly
+            fig = px.pie(
+                names=labels, 
+                values=values,
+                color_discrete_sequence=['#1E88E5', '#4CAF50']
+            )
+            fig.update_layout(margin=dict(t=0, b=0, l=0, r=0))
+            st.plotly_chart(fig, use_container_width=True)
+            st.markdown('</div>', unsafe_allow_html=True)
+        
+        with col2:
+            # Task completion status
+            st.markdown('<div class="card">', unsafe_allow_html=True)
+            st.markdown('<h4>Task Completion Status</h4>', unsafe_allow_html=True)
+            
+            # Data for pie chart
+            labels = ['Completed', 'Pending']
+            values = [completed_tasks, total_tasks - completed_tasks]
+            
+            # Plot using Plotly
+            fig = px.pie(
+                names=labels, 
+                values=values,
+                color_discrete_sequence=['#4CAF50', '#FFC107']
+            )
+            fig.update_layout(margin=dict(t=0, b=0, l=0, r=0))
+            st.plotly_chart(fig, use_container_width=True)
+            st.markdown('</div>', unsafe_allow_html=True)
+    
+    # Recent activities
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.markdown('<h3 class="sub-header">Recent Tasks</h3>', unsafe_allow_html=True)
+        if recent_tasks:
+            for task in recent_tasks:
+                task_description = task[0]
+                due_date = task[1].strftime('%d %b, %Y') if task[1] else "No due date"
+                is_completed = task[2]
+                assigned_to = task[3]
+                assignment_type = task[4]
+                created_at = task[5].strftime('%d %b, %Y')
+                
+                status_class = "completed" if is_completed else ""
+                
+                st.markdown(f'''
+                <div class="task-item {status_class}">
+                    <strong>{assignment_type} Task for {assigned_to}</strong> - Due: {due_date}
+                    <p>{task_description[:100]}{'...' if len(task_description) > 100 else ''}</p>
+                    <div style="display: flex; justify-content: space-between; align-items: center;">
+                        <span style="color: #777; font-size: 0.8rem;">Created: {created_at}</span>
+                        <span style="font-weight: 600; color: {'#9e9e9e' if is_completed else '#4CAF50'};">
+                            {"Completed" if is_completed else "Pending"}
+                        </span>
+                    </div>
+                </div>
+                ''', unsafe_allow_html=True)
+        else:
+            st.info("No tasks available")
+    
+    with col2:
+        st.markdown('<h3 class="sub-header">Recent Employees</h3>', unsafe_allow_html=True)
+        if recent_employees:
+            for employee in recent_employees:
+                full_name = employee[0]
+                role = employee[1]
+                branch_name = employee[2]
+                created_at = employee[3].strftime('%d %b, %Y')
+                is_active = employee[4]
+                
+                status = "Active" if is_active else "Inactive"
+                status_color = "#4CAF50" if is_active else "#F44336"
+                
+                st.markdown(f'''
+                <div class="task-item">
+                    <strong>{full_name}</strong> - {role}
+                    <p>Branch: {branch_name}</p>
+                    <div style="display: flex; justify-content: space-between; align-items: center;">
+                        <span style="color: #777; font-size: 0.8rem;">Joined: {created_at}</span>
+                        <span style="font-weight: 600; color: {status_color};">
+                            {status}
+                        </span>
+                    </div>
+                </div>
+                ''', unsafe_allow_html=True)
+        else:
+            st.info("No employees available")
     
     # Display statistics
     col1, col2, col3, col4 = st.columns(4)
@@ -1183,16 +1497,38 @@ def manage_branches():
     
     company_id = st.session_state.user["id"]
     
-    tab1, tab2 = st.tabs(["Branch List", "Add New Branch"])
+    # Check if main branch exists, create if it doesn't
+    with engine.connect() as conn:
+        result = conn.execute(text('''
+        SELECT COUNT(*) FROM branches 
+        WHERE company_id = :company_id AND is_main = TRUE
+        '''), {'company_id': company_id})
+        main_branch_exists = result.fetchone()[0] > 0
+        
+        if not main_branch_exists:
+            try:
+                # Create main branch for this company
+                conn.execute(text('''
+                INSERT INTO branches (company_id, branch_name, branch_type, is_main, is_active)
+                VALUES (:company_id, 'Main Branch', 'Main', TRUE, TRUE)
+                '''), {'company_id': company_id})
+                conn.commit()
+                st.success("Main Branch has been created automatically")
+            except Exception as e:
+                st.error(f"Error creating main branch: {str(e)}")
+    
+    tab1, tab2, tab3 = st.tabs(["Branch List", "Add New Branch", "Add Sub-Branch"])
     
     with tab1:
         # Fetch and display all branches
         with engine.connect() as conn:
             result = conn.execute(text('''
-            SELECT id, branch_name, location, created_at, is_active
-            FROM branches
-            WHERE company_id = :company_id
-            ORDER BY branch_name
+            SELECT b.id, b.branch_name, b.branch_type, p.branch_name as parent_branch, 
+                   b.location, b.created_at, b.is_active, b.is_main
+            FROM branches b
+            LEFT JOIN branches p ON b.parent_branch_id = p.id
+            WHERE b.company_id = :company_id
+            ORDER BY b.is_main DESC, b.branch_name
             '''), {'company_id': company_id})
             branches = result.fetchall()
         
@@ -1201,87 +1537,41 @@ def manage_branches():
         else:
             st.write(f"Total branches: {len(branches)}")
             
+            # Create a separate list for main branches and sub-branches
+            main_branches = []
+            regular_branches = []
+            sub_branches = []
+            
             for branch in branches:
-                branch_id = branch[0]
-                branch_name = branch[1]
-                location = branch[2] or "Not specified"
-                created_at = branch[3].strftime('%d %b, %Y')
-                is_active = branch[4]
-                
-                with st.expander(f"{branch_name} - {location}", expanded=False):
-                    col1, col2 = st.columns(2)
-                    
-                    with col1:
-                        st.write(f"**Branch Name:** {branch_name}")
-                        st.write(f"**Location:** {location}")
-                    
-                    with col2:
-                        st.write(f"**Created:** {created_at}")
-                        st.write(f"**Status:** {'Active' if is_active else 'Inactive'}")
-                    
-                    # Display employees in this branch
-                    st.markdown("#### Branch Employees")
-                    
-                    with engine.connect() as conn:
-                        result = conn.execute(text('''
-                        SELECT id, full_name, username, is_active
-                        FROM employees
-                        WHERE branch_id = :branch_id
-                        ORDER BY full_name
-                        '''), {'branch_id': branch_id})
-                        employees = result.fetchall()
-                    
-                    if not employees:
-                        st.info(f"No employees assigned to {branch_name}")
-                    else:
-                        employees_df = pd.DataFrame(
-                            [(e[1], e[2], "Active" if e[3] else "Inactive") for e in employees],
-                            columns=["Name", "Username", "Status"]
-                        )
-                        st.dataframe(employees_df, use_container_width=True)
-                    
-                    # Action buttons
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        if is_active:  # If active
-                            if st.button(f"Deactivate Branch", key=f"deactivate_branch_{branch_id}"):
-                                with engine.connect() as conn:
-                                    # Deactivate branch
-                                    conn.execute(text('UPDATE branches SET is_active = FALSE WHERE id = :id'), {'id': branch_id})
-                                    
-                                    # Cascade deactivation to employees
-                                    conn.execute(text('UPDATE employees SET is_active = FALSE WHERE branch_id = :branch_id'), 
-                                              {'branch_id': branch_id})
-                                    
-                                    conn.commit()
-                                st.success(f"Deactivated branch: {branch_name} (including all employees)")
-                                st.rerun()
-                        else:  # If inactive
-                            if st.button(f"Activate Branch", key=f"activate_branch_{branch_id}"):
-                                with engine.connect() as conn:
-                                    # Activate branch
-                                    conn.execute(text('UPDATE branches SET is_active = TRUE WHERE id = :id'), {'id': branch_id})
-                                    
-                                    # Cascade activation to employees
-                                    conn.execute(text('UPDATE employees SET is_active = TRUE WHERE branch_id = :branch_id'), 
-                                              {'branch_id': branch_id})
-                                    
-                                    conn.commit()
-                                st.success(f"Activated branch: {branch_name} (including all employees)")
-                                st.rerun()
-                    
-                    with col2:
-                        if st.button(f"Edit Branch", key=f"edit_branch_{branch_id}"):
-                            st.session_state.edit_branch = {
-                                'id': branch_id,
-                                'name': branch_name,
-                                'location': location if location != "Not specified" else ""
-                            }
-                            st.rerun()
+                if branch[7]:  # is_main
+                    main_branches.append(branch)
+                elif branch[2] == "Sub-Branch":
+                    sub_branches.append(branch)
+                else:
+                    regular_branches.append(branch)
+            
+            # Display main branch first
+            if main_branches:
+                st.markdown("### Main Branch")
+                for branch in main_branches:
+                    display_branch(branch, company_id)
+            
+            # Display regular branches
+            if regular_branches:
+                st.markdown("### Branches")
+                for branch in regular_branches:
+                    display_branch(branch, company_id)
+            
+            # Display sub-branches
+            if sub_branches:
+                st.markdown("### Sub-Branches")
+                for branch in sub_branches:
+                    display_branch(branch, company_id)
     
     with tab2:
         # Form to add new branch
         with st.form("add_branch_form"):
+            st.subheader("Add New Branch")
             branch_name = st.text_input("Branch Name", help="Name of the branch")
             location = st.text_input("Location", help="Branch location (city, address, etc.)")
             
@@ -1294,8 +1584,8 @@ def manage_branches():
                     try:
                         with engine.connect() as conn:
                             conn.execute(text('''
-                            INSERT INTO branches (company_id, branch_name, location, is_active)
-                            VALUES (:company_id, :branch_name, :location, TRUE)
+                            INSERT INTO branches (company_id, branch_name, branch_type, location, is_active)
+                            VALUES (:company_id, :branch_name, 'Branch', :location, TRUE)
                             '''), {
                                 'company_id': company_id,
                                 'branch_name': branch_name,
@@ -1305,6 +1595,53 @@ def manage_branches():
                         st.success(f"Successfully added branch: {branch_name}")
                     except Exception as e:
                         st.error(f"Error adding branch: {e}")
+    
+    with tab3:
+        # Form to add new sub-branch connected to a parent branch
+        with st.form("add_sub_branch_form"):
+            st.subheader("Add New Sub-Branch")
+            
+            # Get parent branches for selection
+            with engine.connect() as conn:
+                result = conn.execute(text('''
+                SELECT id, branch_name FROM branches 
+                WHERE company_id = :company_id AND is_active = TRUE
+                ORDER BY branch_name
+                '''), {'company_id': company_id})
+                parent_branches = result.fetchall()
+            
+            if not parent_branches:
+                st.error("You need to create at least one main branch or branch first")
+                st.stop()
+            
+            parent_branch_id = st.selectbox("Parent Branch", 
+                                    options=[b[0] for b in parent_branches],
+                                    format_func=lambda x: next(b[1] for b in parent_branches if b[0] == x))
+            
+            sub_branch_name = st.text_input("Sub-Branch Name", help="Name of the sub-branch")
+            location = st.text_input("Location", help="Sub-branch location (city, address, etc.)")
+            
+            submitted = st.form_submit_button("Add Sub-Branch")
+            if submitted:
+                if not sub_branch_name:
+                    st.error("Please enter a sub-branch name")
+                else:
+                    # Insert new sub-branch
+                    try:
+                        with engine.connect() as conn:
+                            conn.execute(text('''
+                            INSERT INTO branches (company_id, branch_name, branch_type, parent_branch_id, location, is_active)
+                            VALUES (:company_id, :branch_name, 'Sub-Branch', :parent_branch_id, :location, TRUE)
+                            '''), {
+                                'company_id': company_id,
+                                'branch_name': sub_branch_name,
+                                'parent_branch_id': parent_branch_id,
+                                'location': location
+                            })
+                            conn.commit()
+                        st.success(f"Successfully added sub-branch: {sub_branch_name}")
+                    except Exception as e:
+                        st.error(f"Error adding sub-branch: {e}")
     
     # Edit branch form if selected
     if hasattr(st.session_state, 'edit_branch'):
@@ -1343,23 +1680,150 @@ def manage_branches():
                 del st.session_state.edit_branch
                 st.rerun()
 
+# Helper function to display a branch with its details and actions
+def display_branch(branch, company_id):
+    branch_id = branch[0]
+    branch_name = branch[1]
+    branch_type = branch[2]
+    parent_branch = branch[3] or "None"
+    location = branch[4] or "Not specified"
+    created_at = branch[5].strftime('%d %b, %Y')
+    is_active = branch[6]
+    is_main = branch[7]
+    
+    with st.expander(f"{branch_name} ({branch_type})", expanded=False):
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.write(f"**Branch Name:** {branch_name}")
+            st.write(f"**Branch Type:** {branch_type}")
+            if branch_type == "Sub-Branch":
+                st.write(f"**Parent Branch:** {parent_branch}")
+            st.write(f"**Location:** {location}")
+        
+        with col2:
+            st.write(f"**Created:** {created_at}")
+            st.write(f"**Status:** {'Active' if is_active else 'Inactive'}")
+            
+            # Display employee count
+            with engine.connect() as conn:
+                result = conn.execute(text('''
+                SELECT COUNT(*) FROM employees
+                WHERE branch_id = :branch_id
+                '''), {'branch_id': branch_id})
+                employee_count = result.fetchone()[0]
+            
+            st.write(f"**Employees:** {employee_count}")
+        
+        # Display employees in this branch
+        st.markdown("#### Branch Employees")
+        
+        with engine.connect() as conn:
+            result = conn.execute(text('''
+            SELECT id, full_name, username, role, is_active
+            FROM employees
+            WHERE branch_id = :branch_id
+            ORDER BY role, full_name
+            '''), {'branch_id': branch_id})
+            employees = result.fetchall()
+        
+        if not employees:
+            st.info(f"No employees assigned to {branch_name}")
+        else:
+            employees_df = pd.DataFrame(
+                [(e[1], e[2], e[3], "Active" if e[4] else "Inactive") for e in employees],
+                columns=["Name", "Username", "Role", "Status"]
+            )
+            st.dataframe(employees_df, use_container_width=True)
+        
+        # Action buttons
+        if not is_main:  # Don't allow deactivation of main branch
+            col1, col2 = st.columns(2)
+            with col1:
+                if is_active:  # If active
+                    if st.button(f"Deactivate Branch", key=f"deactivate_branch_{branch_id}"):
+                        with engine.connect() as conn:
+                            # Deactivate branch
+                            conn.execute(text('UPDATE branches SET is_active = FALSE WHERE id = :id'), {'id': branch_id})
+                            
+                            # Cascade deactivation to sub-branches
+                            conn.execute(text('''
+                            UPDATE branches SET is_active = FALSE 
+                            WHERE parent_branch_id = :branch_id AND company_id = :company_id
+                            '''), {'branch_id': branch_id, 'company_id': company_id})
+                            
+                            # Cascade deactivation to employees
+                            conn.execute(text('UPDATE employees SET is_active = FALSE WHERE branch_id = :branch_id'), 
+                                      {'branch_id': branch_id})
+                            
+                            # Also deactivate employees in sub-branches
+                            sub_branch_ids = conn.execute(text('''
+                            SELECT id FROM branches WHERE parent_branch_id = :branch_id
+                            '''), {'branch_id': branch_id}).fetchall()
+                            
+                            for sub_id in sub_branch_ids:
+                                conn.execute(text('UPDATE employees SET is_active = FALSE WHERE branch_id = :branch_id'), 
+                                          {'branch_id': sub_id[0]})
+                            
+                            conn.commit()
+                        st.success(f"Deactivated branch: {branch_name} (including all sub-branches and employees)")
+                        st.rerun()
+                else:  # If inactive
+                    if st.button(f"Activate Branch", key=f"activate_branch_{branch_id}"):
+                        with engine.connect() as conn:
+                            # Activate branch
+                            conn.execute(text('UPDATE branches SET is_active = TRUE WHERE id = :id'), {'id': branch_id})
+                            
+                            # Cascade activation to sub-branches
+                            conn.execute(text('''
+                            UPDATE branches SET is_active = TRUE 
+                            WHERE parent_branch_id = :branch_id AND company_id = :company_id
+                            '''), {'branch_id': branch_id, 'company_id': company_id})
+                            
+                            # Cascade activation to employees
+                            conn.execute(text('UPDATE employees SET is_active = TRUE WHERE branch_id = :branch_id'), 
+                                      {'branch_id': branch_id})
+                            
+                            # Also activate employees in sub-branches
+                            sub_branch_ids = conn.execute(text('''
+                            SELECT id FROM branches WHERE parent_branch_id = :branch_id
+                            '''), {'branch_id': branch_id}).fetchall()
+                            
+                            for sub_id in sub_branch_ids:
+                                conn.execute(text('UPDATE employees SET is_active = TRUE WHERE branch_id = :branch_id'), 
+                                          {'branch_id': sub_id[0]})
+                            
+                            conn.commit()
+                        st.success(f"Activated branch: {branch_name} (including all sub-branches and employees)")
+                        st.rerun()
+            
+            with col2:
+                if st.button(f"Edit Branch", key=f"edit_branch_{branch_id}"):
+                    st.session_state.edit_branch = {
+                        'id': branch_id,
+                        'name': branch_name,
+                        'location': location if location != "Not specified" else ""
+                    }
+                    st.rerun()
+
 # Manage Employees for Companies
 def manage_company_employees():
     st.markdown('<h2 class="sub-header">Manage Employees</h2>', unsafe_allow_html=True)
     
     company_id = st.session_state.user["id"]
     
-    tab1, tab2 = st.tabs(["Employee List", "Add New Employee"])
+    tab1, tab2, tab3 = st.tabs(["Employee List", "Add New Employee", "Update Employee Role"])
     
     with tab1:
         # Fetch and display all employees
         with engine.connect() as conn:
             result = conn.execute(text('''
-            SELECT e.id, e.username, e.full_name, e.profile_pic_url, e.is_active, b.branch_name, e.created_at 
+            SELECT e.id, e.username, e.full_name, e.profile_pic_url, e.is_active, 
+                   b.branch_name, e.created_at, e.role, b.id as branch_id
             FROM employees e
             JOIN branches b ON e.branch_id = b.id
             WHERE b.company_id = :company_id
-            ORDER BY e.full_name
+            ORDER BY e.role, e.full_name
             '''), {'company_id': company_id})
             employees = result.fetchall()
         
@@ -1367,7 +1831,7 @@ def manage_company_employees():
             st.info("No employees found. Add employees using the 'Add New Employee' tab.")
         else:
             # Filter options
-            col1, col2 = st.columns(2)
+            col1, col2, col3 = st.columns(3)
             
             with col1:
                 # Branch filter
@@ -1383,6 +1847,11 @@ def manage_company_employees():
                 branch_filter = st.selectbox("Filter by Branch", branch_options, key="employee_branch_filter")
             
             with col2:
+                # Role filter
+                role_options = ["All Roles", "Manager", "Asst. Manager", "General Employee"]
+                role_filter = st.selectbox("Filter by Role", role_options, key="employee_role_filter")
+            
+            with col3:
                 # Status filter
                 status_options = ["All Employees", "Active", "Inactive"]
                 status_filter = st.selectbox("Filter by Status", status_options, key="employee_status_filter")
@@ -1391,6 +1860,9 @@ def manage_company_employees():
             filtered_employees = employees
             if branch_filter != "All Branches":
                 filtered_employees = [e for e in filtered_employees if e[5] == branch_filter]
+            
+            if role_filter != "All Roles":
+                filtered_employees = [e for e in filtered_employees if e[7] == role_filter]
             
             if status_filter == "Active":
                 filtered_employees = [e for e in filtered_employees if e[4]]
@@ -1407,8 +1879,10 @@ def manage_company_employees():
                 is_active = employee[4]
                 branch_name = employee[5]
                 created_at = employee[6].strftime('%d %b, %Y')
+                role = employee[7]
+                branch_id = employee[8]
                 
-                with st.expander(f"{full_name} ({username})", expanded=False):
+                with st.expander(f"{full_name} ({role})", expanded=False):
                     col1, col2 = st.columns([1, 3])
                     
                     with col1:
@@ -1420,12 +1894,13 @@ def manage_company_employees():
                     with col2:
                         st.write(f"**Full Name:** {full_name}")
                         st.write(f"**Username:** {username}")
+                        st.write(f"**Role:** {role}")
                         st.write(f"**Branch:** {branch_name}")
                         st.write(f"**Joined:** {created_at}")
                         st.write(f"**Status:** {'Active' if is_active else 'Inactive'}")
                         
                         # Action buttons
-                        col1, col2 = st.columns(2)
+                        col1, col2, col3 = st.columns(3)
                         with col1:
                             if is_active:  # If active
                                 if st.button(f"Deactivate", key=f"deactivate_employee_{employee_id}"):
@@ -1450,6 +1925,16 @@ def manage_company_employees():
                                               {'id': employee_id, 'password': new_password})
                                     conn.commit()
                                 st.success(f"Password reset to '{new_password}' for {full_name}")
+                        
+                        with col3:
+                            if st.button(f"Transfer Employee", key=f"transfer_{employee_id}"):
+                                st.session_state.transfer_employee = {
+                                    'id': employee_id,
+                                    'name': full_name,
+                                    'current_branch_id': branch_id,
+                                    'current_branch_name': branch_name
+                                }
+                                st.rerun()
     
     with tab2:
         # Form to add new employee
@@ -1470,6 +1955,9 @@ def manage_company_employees():
             branch_id = st.selectbox("Branch", 
                                options=[b[0] for b in branches],
                                format_func=lambda x: next(b[1] for b in branches if b[0] == x))
+            
+            # Role selection
+            role = st.selectbox("Role", ["Manager", "Asst. Manager", "General Employee"])
             
             username = st.text_input("Username", help="Username for employee login")
             password = st.text_input("Password", type="password", help="Initial password")
@@ -1493,19 +1981,111 @@ def manage_company_employees():
                             # Insert new employee
                             try:
                                 conn.execute(text('''
-                                INSERT INTO employees (username, password, full_name, profile_pic_url, is_active, branch_id)
-                                VALUES (:username, :password, :full_name, :profile_pic_url, TRUE, :branch_id)
+                                INSERT INTO employees (username, password, full_name, profile_pic_url, is_active, branch_id, role)
+                                VALUES (:username, :password, :full_name, :profile_pic_url, TRUE, :branch_id, :role)
                                 '''), {
                                     'username': username,
                                     'password': password,
                                     'full_name': full_name,
                                     'profile_pic_url': profile_pic_url,
-                                    'branch_id': branch_id
+                                    'branch_id': branch_id,
+                                    'role': role
                                 })
                                 conn.commit()
                                 st.success(f"Successfully added employee: {full_name}")
                             except Exception as e:
                                 st.error(f"Error adding employee: {e}")
+    
+    with tab3:
+        # Update employee role
+        with st.form("update_role_form"):
+            # Select employee
+            with engine.connect() as conn:
+                result = conn.execute(text('''
+                SELECT e.id, e.full_name, e.role, b.branch_name
+                FROM employees e
+                JOIN branches b ON e.branch_id = b.id
+                WHERE b.company_id = :company_id AND e.is_active = TRUE
+                ORDER BY e.full_name
+                '''), {'company_id': company_id})
+                role_employees = result.fetchall()
+            
+            if not role_employees:
+                st.error("No active employees found")
+                st.stop()
+            
+            employee_id = st.selectbox("Select Employee", 
+                                 options=[e[0] for e in role_employees],
+                                 format_func=lambda x: f"{next(e[1] for e in role_employees if e[0] == x)} - {next(e[3] for e in role_employees if e[0] == x)} ({next(e[2] for e in role_employees if e[0] == x)})")
+            
+            # Get current role
+            current_role = next(e[2] for e in role_employees if e[0] == employee_id)
+            st.write(f"Current Role: **{current_role}**")
+            
+            # New role
+            new_role = st.selectbox("New Role", ["Manager", "Asst. Manager", "General Employee"])
+            
+            submitted = st.form_submit_button("Update Role")
+            if submitted:
+                if new_role == current_role:
+                    st.info("No change in role")
+                else:
+                    with engine.connect() as conn:
+                        conn.execute(text('UPDATE employees SET role = :role WHERE id = :id'), 
+                                  {'id': employee_id, 'role': new_role})
+                        conn.commit()
+                    
+                    employee_name = next(e[1] for e in role_employees if e[0] == employee_id)
+                    st.success(f"Updated role for {employee_name} from {current_role} to {new_role}")
+    
+    # Transfer employee form if selected
+    if hasattr(st.session_state, 'transfer_employee'):
+        st.markdown(f'<h3 class="sub-header">Transfer {st.session_state.transfer_employee["name"]}</h3>', unsafe_allow_html=True)
+        
+        with st.form("transfer_employee_form"):
+            st.write(f"Current Branch: **{st.session_state.transfer_employee['current_branch_name']}**")
+            
+            # Get branches for transfer
+            with engine.connect() as conn:
+                result = conn.execute(text('''
+                SELECT id, branch_name FROM branches 
+                WHERE company_id = :company_id AND is_active = TRUE 
+                AND id != :current_branch_id
+                ORDER BY branch_name
+                '''), {
+                    'company_id': company_id,
+                    'current_branch_id': st.session_state.transfer_employee['current_branch_id']
+                })
+                available_branches = result.fetchall()
+            
+            if not available_branches:
+                st.error("No other active branches available for transfer")
+                st.stop()
+            
+            new_branch_id = st.selectbox("Transfer to Branch", 
+                                   options=[b[0] for b in available_branches],
+                                   format_func=lambda x: next(b[1] for b in available_branches if b[0] == x))
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                submitted = st.form_submit_button("Transfer Employee")
+            with col2:
+                cancel = st.form_submit_button("Cancel")
+            
+            if submitted:
+                with engine.connect() as conn:
+                    conn.execute(text('UPDATE employees SET branch_id = :branch_id WHERE id = :id'), 
+                              {'id': st.session_state.transfer_employee['id'], 'branch_id': new_branch_id})
+                    conn.commit()
+                
+                new_branch_name = next(b[1] for b in available_branches if b[0] == new_branch_id)
+                st.success(f"Transferred {st.session_state.transfer_employee['name']} from {st.session_state.transfer_employee['current_branch_name']} to {new_branch_name}")
+                del st.session_state.transfer_employee
+                st.rerun()
+            
+            if cancel:
+                del st.session_state.transfer_employee
+                st.rerun()
 
 # View Company Reports
 def view_company_reports():
@@ -1547,6 +2127,11 @@ def view_company_reports():
             employee_filter = "All Employees"
     
     with col2:
+        # Role filter
+        role_options = ["All Roles", "Manager", "Asst. Manager", "General Employee"]
+        role_filter = st.selectbox("Select Role", role_options, key="company_reports_role_filter")
+    
+    with col3:
         # Date range filter
         today = datetime.date.today()
         date_options = [
@@ -1558,8 +2143,7 @@ def view_company_reports():
             "Custom Range"
         ]
         date_filter = st.selectbox("Date Range", date_options, key="company_reports_date_filter")
-    
-    with col3:
+        
         # Custom date range if selected
         if date_filter == "Custom Range":
             start_date = st.date_input("Start Date", today - datetime.timedelta(days=30))
@@ -1584,7 +2168,7 @@ def view_company_reports():
     
     # Build query based on filters
     query = '''
-    SELECT e.full_name, dr.report_date, dr.report_text, dr.id, e.id as employee_id, b.branch_name
+    SELECT e.full_name, dr.report_date, dr.report_text, dr.id, e.id as employee_id, b.branch_name, e.role
     FROM daily_reports dr
     JOIN employees e ON dr.employee_id = e.id
     JOIN branches b ON e.branch_id = b.id
@@ -1602,7 +2186,11 @@ def view_company_reports():
             query += ' AND e.full_name = :employee_name'
             params['employee_name'] = employee_filter
     
-    query += ' ORDER BY dr.report_date DESC, b.branch_name, e.full_name'
+    if role_filter != "All Roles":
+        query += ' AND e.role = :role'
+        params['role'] = role_filter
+    
+    query += ' ORDER BY dr.report_date DESC, b.branch_name, e.role, e.full_name'
     
     # Execute query
     with engine.connect() as conn:
@@ -1615,6 +2203,17 @@ def view_company_reports():
     else:
         st.write(f"Found {len(reports)} reports")
         
+        # Add export button
+        if len(reports) > 0:
+            pdf = create_company_report_pdf(reports, start_date, end_date, branch_filter, role_filter)
+            
+            st.download_button(
+                label="Export as PDF",
+                data=pdf,
+                file_name=f"employee_reports_{start_date}_to_{end_date}.pdf",
+                mime="application/pdf"
+            )
+        
         # Group by branch for better organization
         reports_by_branch = {}
         for report in reports:
@@ -1622,35 +2221,194 @@ def view_company_reports():
             if branch_name not in reports_by_branch:
                 reports_by_branch[branch_name] = {}
             
-            employee_name = report[0]
-            if employee_name not in reports_by_branch[branch_name]:
-                reports_by_branch[branch_name][employee_name] = []
+            role = report[6]
+            if role not in reports_by_branch[branch_name]:
+                reports_by_branch[branch_name][role] = {}
             
-            reports_by_branch[branch_name][employee_name].append(report)
+            employee_name = report[0]
+            if employee_name not in reports_by_branch[branch_name][role]:
+                reports_by_branch[branch_name][role][employee_name] = []
+            
+            reports_by_branch[branch_name][role][employee_name].append(report)
         
         # Display branches
-        for branch_name, employees in reports_by_branch.items():
+        for branch_name, roles in reports_by_branch.items():
             with st.expander(f"Branch: {branch_name}", expanded=True):
-                # Display employees
-                for employee_name, emp_reports in employees.items():
-                    with st.expander(f"Reports by {employee_name} ({len(emp_reports)})", expanded=False):
-                        # Group by month/year for better organization
-                        reports_by_period = {}
-                        for report in emp_reports:
-                            period = report[1].strftime('%B %Y')
-                            if period not in reports_by_period:
-                                reports_by_period[period] = []
-                            reports_by_period[period].append(report)
+                # Display roles
+                for role, employees in roles.items():
+                    st.markdown(f"### {role}s")
+                    
+                    # Display employees
+                    for employee_name, emp_reports in employees.items():
+                        with st.expander(f"Reports by {employee_name} ({len(emp_reports)})", expanded=False):
+                            # Group by month/year for better organization
+                            reports_by_period = {}
+                            for report in emp_reports:
+                                period = report[1].strftime('%B %Y')
+                                if period not in reports_by_period:
+                                    reports_by_period[period] = []
+                                reports_by_period[period].append(report)
+                            
+                            for period, period_reports in reports_by_period.items():
+                                st.markdown(f"##### {period}")
+                                for report in period_reports:
+                                    st.markdown(f'''
+                                    <div class="report-item">
+                                        <span style="color: #777;">{report[1].strftime('%A, %d %b %Y')}</span>
+                                        <p>{report[2]}</p>
+                                    </div>
+                                    ''', unsafe_allow_html=True)
+
+# Create PDF for company reports with filters
+def create_company_report_pdf(reports, start_date, end_date, branch_filter, role_filter):
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=letter)
+    styles = getSampleStyleSheet()
+    elements = []
+    
+    # Title
+    title_style = ParagraphStyle(
+        'Title',
+        parent=styles['Heading1'],
+        fontSize=16,
+        alignment=1,
+        spaceAfter=12
+    )
+    
+    # Create title based on filters
+    title = "Employee Reports"
+    if branch_filter != "All Branches":
+        title += f" - {branch_filter}"
+    if role_filter != "All Roles":
+        title += f" - {role_filter}s"
+    
+    elements.append(Paragraph(title, title_style))
+    elements.append(Spacer(1, 12))
+    
+    # Date range
+    date_style = ParagraphStyle(
+        'DateRange',
+        parent=styles['Normal'],
+        fontSize=10,
+        alignment=1,
+        textColor=colors.gray
+    )
+    
+    date_range = f"Period: {start_date.strftime('%d %b %Y')} to {end_date.strftime('%d %b %Y')}"
+    elements.append(Paragraph(date_range, date_style))
+    elements.append(Spacer(1, 20))
+    
+    # Group reports by branch, role, and employee
+    reports_by_branch = {}
+    for report in reports:
+        employee_name = report[0]
+        report_date = report[1]
+        report_text = report[2]
+        branch_name = report[5]
+        role = report[6]
+        
+        if branch_name not in reports_by_branch:
+            reports_by_branch[branch_name] = {}
+        
+        if role not in reports_by_branch[branch_name]:
+            reports_by_branch[branch_name][role] = {}
+        
+        if employee_name not in reports_by_branch[branch_name][role]:
+            reports_by_branch[branch_name][role][employee_name] = []
+        
+        reports_by_branch[branch_name][role][employee_name].append((report_date, report_text))
+    
+    # Add each branch's reports
+    for branch_name, roles in reports_by_branch.items():
+        # Branch header
+        branch_style = ParagraphStyle(
+            'Branch',
+            parent=styles['Heading2'],
+            fontSize=14,
+            spaceAfter=10
+        )
+        elements.append(Paragraph(f"Branch: {branch_name}", branch_style))
+        
+        # Add each role's reports
+        for role, employees in roles.items():
+            # Role header
+            role_style = ParagraphStyle(
+                'Role',
+                parent=styles['Heading3'],
+                fontSize=12,
+                spaceAfter=8
+            )
+            elements.append(Paragraph(f"{role}s", role_style))
+            
+            # Add each employee's reports
+            for employee_name, emp_reports in employees.items():
+                # Employee header
+                employee_style = ParagraphStyle(
+                    'Employee',
+                    parent=styles['Heading4'],
+                    fontSize=11,
+                    spaceAfter=6
+                )
+                elements.append(Paragraph(employee_name, employee_style))
+                
+                # Sort reports by date
+                emp_reports.sort(key=lambda x: x[0], reverse=True)
+                
+                # Group by month for better organization
+                reports_by_month = {}
+                for report_date, report_text in emp_reports:
+                    month_year = report_date.strftime('%B %Y')
+                    if month_year not in reports_by_month:
+                        reports_by_month[month_year] = []
+                    reports_by_month[month_year].append((report_date, report_text))
+                
+                # Add each month's reports
+                for month, month_reports in reports_by_month.items():
+                    # Month header
+                    month_style = ParagraphStyle(
+                        'Month',
+                        parent=styles['Normal'],
+                        fontSize=10,
+                        textColor=colors.blue,
+                        spaceBefore=8,
+                        spaceAfter=4
+                    )
+                    elements.append(Paragraph(month, month_style))
+                    
+                    # Reports for the month
+                    for report_date, report_text in month_reports:
+                        # Date
+                        date_style = ParagraphStyle(
+                            'Date',
+                            parent=styles['Normal'],
+                            fontSize=9,
+                            textColor=colors.gray
+                        )
+                        elements.append(Paragraph(report_date.strftime('%A, %d %b %Y'), date_style))
                         
-                        for period, period_reports in reports_by_period.items():
-                            st.markdown(f"##### {period}")
-                            for report in period_reports:
-                                st.markdown(f'''
-                                <div class="report-item">
-                                    <span style="color: #777;">{report[1].strftime('%A, %d %b %Y')}</span>
-                                    <p>{report[2]}</p>
-                                </div>
-                                ''', unsafe_allow_html=True)
+                        # Report text
+                        text_style = ParagraphStyle(
+                            'ReportText',
+                            parent=styles['Normal'],
+                            fontSize=9,
+                            leftIndent=20,
+                            spaceBefore=2,
+                            spaceAfter=10
+                        )
+                        elements.append(Paragraph(report_text, text_style))
+                
+                elements.append(Spacer(1, 10))
+            
+            elements.append(Spacer(1, 10))
+        
+        elements.append(Spacer(1, 15))
+        elements.append(Paragraph("", styles['Normal']))
+        elements.append(Spacer(1, 15))
+    
+    # Build PDF
+    doc.build(elements)
+    buffer.seek(0)
+    return buffer.getvalue()
 
 # View Company Messages
 def view_company_messages():
@@ -1726,7 +2484,7 @@ def edit_company_profile():
     with col1:
         st.markdown("<p>Current Profile Picture:</p>", unsafe_allow_html=True)
         try:
-            st.image(current_pic_url, width=150, use_container_width=False)
+            st.image(current_pic_url or "https://www.gravatar.com/avatar/00000000000000000000000000000000?d=mp&f=y", width=150, use_container_width=False)
         except:
             st.image("https://www.gravatar.com/avatar/00000000000000000000000000000000?d=mp&f=y", width=150, use_container_width=False)
     
@@ -1755,7 +2513,7 @@ def edit_company_profile():
             updates_made = False
             
             # Check if any changes were made to name or picture URL
-            if new_company_name != current_company_name or new_profile_pic_url != current_pic_url:
+            if new_company_name != current_company_name or new_profile_pic_url != (current_pic_url or ""):
                 with engine.connect() as conn:
                     conn.execute(text('''
                     UPDATE companies
@@ -1811,6 +2569,616 @@ def edit_company_profile():
             if updates_made:
                 time.sleep(1)  # Give the user time to read the success message
                 st.rerun()
+
+# View Detailed Task Tracking
+def view_task_tracking():
+    st.markdown('<h2 class="sub-header">Task Tracking Dashboard</h2>', unsafe_allow_html=True)
+    
+    company_id = st.session_state.user["id"]
+    
+    # Filters
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        # Branch filter
+        with engine.connect() as conn:
+            result = conn.execute(text('''
+            SELECT id, branch_name FROM branches 
+            WHERE company_id = :company_id AND is_active = TRUE
+            ORDER BY branch_name
+            '''), {'company_id': company_id})
+            branches = result.fetchall()
+        
+        branch_options = ["All Branches"] + [branch[1] for branch in branches]
+        branch_filter = st.selectbox("Filter by Branch", branch_options, key="track_branch_filter")
+    
+    with col2:
+        # Status filter
+        status_options = ["All Tasks", "Pending", "Completed"]
+        status_filter = st.selectbox("Filter by Status", status_options, key="track_status_filter")
+    
+    # Query for branch tasks with employee completion status
+    query = '''
+    SELECT 
+        t.id, t.task_description, t.due_date, t.is_completed, 
+        b.branch_name, t.created_at, t.branch_id,
+        (SELECT COUNT(*) FROM task_assignments ta WHERE ta.task_id = t.id) as total_assignments,
+        (SELECT COUNT(*) FROM task_assignments ta WHERE ta.task_id = t.id AND ta.is_completed = TRUE) as completed_assignments
+    FROM tasks t
+    JOIN branches b ON t.branch_id = b.id
+    WHERE b.company_id = :company_id AND t.employee_id IS NULL
+    '''
+    
+    params = {'company_id': company_id}
+    
+    if branch_filter != "All Branches":
+        query += ' AND b.branch_name = :branch_name'
+        params['branch_name'] = branch_filter
+    
+    if status_filter == "Pending":
+        query += ' AND t.is_completed = FALSE'
+    elif status_filter == "Completed":
+        query += ' AND t.is_completed = TRUE'
+    
+    query += ' ORDER BY t.due_date ASC NULLS LAST, t.created_at DESC'
+    
+    # Execute query
+    with engine.connect() as conn:
+        result = conn.execute(text(query), params)
+        branch_tasks = result.fetchall()
+    
+    # Display branch tasks with detailed employee completion tracking
+    if branch_tasks:
+        st.markdown("### Branch Task Progress")
+        
+        # Group tasks by branch
+        tasks_by_branch = {}
+        for task in branch_tasks:
+            branch_name = task[4]
+            if branch_name not in tasks_by_branch:
+                tasks_by_branch[branch_name] = []
+            tasks_by_branch[branch_name].append(task)
+        
+        # Display tasks by branch
+        for branch_name, branch_task_list in tasks_by_branch.items():
+            with st.expander(f"Tasks for {branch_name} ({len(branch_task_list)})", expanded=True):
+                for task in branch_task_list:
+                    task_id = task[0]
+                    task_description = task[1]
+                    due_date = task[2].strftime('%d %b, %Y') if task[2] else "No due date"
+                    is_completed = task[3]
+                    created_at = task[5].strftime('%d %b, %Y')
+                    branch_id = task[6]
+                    total_assignments = task[7]
+                    completed_assignments = task[8]
+                    
+                    # Calculate completion percentage
+                    completion_percentage = 0 if total_assignments == 0 else int((completed_assignments / total_assignments) * 100)
+                    
+                    # Display progress bar color based on completion
+                    if completion_percentage == 100:
+                        progress_color = "bg-success"
+                    elif completion_percentage >= 75:
+                        progress_color = "bg-info"
+                    elif completion_percentage >= 50:
+                        progress_color = "bg-warning"
+                    else:
+                        progress_color = "bg-danger"
+                    
+                    # Create progress bar HTML
+                    progress_bar = f'''
+                    <div class="progress" style="height: 20px;">
+                        <div class="progress-bar {progress_color}" role="progressbar" 
+                             style="width: {completion_percentage}%;" 
+                             aria-valuenow="{completion_percentage}" aria-valuemin="0" aria-valuemax="100">
+                            {completion_percentage}%
+                        </div>
+                    </div>
+                    '''
+                    
+                    # Display the task with status-based styling
+                    status_class = "completed" if is_completed else ""
+                    status_tag = f'<span class="badge bg-success">Completed</span>' if is_completed else f'<span class="badge bg-warning">In Progress</span>'
+                    
+                    st.markdown(f'''
+                    <div class="task-item {status_class}">
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                            <strong>Due: {due_date}</strong>
+                            {status_tag}
+                        </div>
+                        <p>{task_description}</p>
+                        <p><strong>Progress:</strong> {completed_assignments} of {total_assignments} employees completed</p>
+                        {progress_bar}
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 10px;">
+                            <span style="color: #777; font-size: 0.8rem;">Created: {created_at}</span>
+                        </div>
+                    </div>
+                    ''', unsafe_allow_html=True)
+                    
+                    # Show employee completion details
+                    with st.expander("View Employee Completion Details"):
+                        # Get employee completion details
+                        with engine.connect() as conn:
+                            result = conn.execute(text('''
+                            SELECT e.full_name, e.role, ta.is_completed, 
+                                   ta.completed_at
+                            FROM task_assignments ta
+                            JOIN employees e ON ta.employee_id = e.id
+                            WHERE ta.task_id = :task_id
+                            ORDER BY e.role, e.full_name
+                            '''), {'task_id': task_id})
+                            employee_completion = result.fetchall()
+                        
+                        if employee_completion:
+                            # Create a dataframe for display
+                            completion_data = []
+                            for emp in employee_completion:
+                                completion_data.append({
+                                    'Employee': emp[0],
+                                    'Role': emp[1],
+                                    'Status': 'Completed' if emp[2] else 'Pending',
+                                    'Completed On': emp[3].strftime('%d %b, %Y %H:%M') if emp[3] else 'N/A'
+                                })
+                            
+                            completion_df = pd.DataFrame(completion_data)
+                            st.dataframe(completion_df, use_container_width=True)
+                        else:
+                            st.info("No employee assignment details found")
+                    
+                    # Action buttons for task management
+                    if not is_completed:
+                        if st.button(f"Mark as Completed (Override)", key=f"track_complete_{task_id}"):
+                            with engine.connect() as conn:
+                                conn.execute(text('''
+                                UPDATE tasks 
+                                SET is_completed = TRUE, completed_by_id = :company_id 
+                                WHERE id = :id
+                                '''), {'id': task_id, 'company_id': company_id})
+                                
+                                conn.execute(text('''
+                                UPDATE task_assignments 
+                                SET is_completed = TRUE, completed_at = CURRENT_TIMESTAMP 
+                                WHERE task_id = :task_id AND is_completed = FALSE
+                                '''), {'task_id': task_id})
+                                
+                                conn.commit()
+                            st.success("Task marked as completed for all employees")
+                            st.rerun()
+    else:
+        st.info("No branch tasks found for the selected criteria")
+    
+    # Add to Company Dashboard
+    st.markdown('''
+    <script>
+    // Add custom CSS for badges and progress bars
+    const style = document.createElement('style');
+    style.textContent = `
+        .badge {
+            display: inline-block;
+            padding: 0.25em 0.4em;
+            font-size: 75%;
+            font-weight: 700;
+            line-height: 1;
+            text-align: center;
+            white-space: nowrap;
+            vertical-align: baseline;
+            border-radius: 0.25rem;
+            color: white;
+        }
+        .bg-success {
+            background-color: #28a745!important;
+        }
+        .bg-warning {
+            background-color: #ffc107!important;
+            color: black;
+        }
+        .bg-info {
+            background-color: #17a2b8!important;
+        }
+        .bg-danger {
+            background-color: #dc3545!important;
+        }
+        .progress {
+            display: flex;
+            height: 1rem;
+            overflow: hidden;
+            font-size: .75rem;
+            background-color: #e9ecef;
+            border-radius: 0.25rem;
+            margin: 10px 0;
+        }
+        .progress-bar {
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            color: #fff;
+            text-align: center;
+            white-space: nowrap;
+            transition: width .6s ease;
+        }
+    `;
+    document.head.appendChild(style);
+    </script>
+    ''', unsafe_allow_html=True)# Manage Tasks for Companies
+def manage_company_tasks():
+    st.markdown('<h2 class="sub-header">Manage Tasks</h2>', unsafe_allow_html=True)
+    
+    company_id = st.session_state.user["id"]
+    
+    tab1, tab2 = st.tabs(["View Tasks", "Assign New Task"])
+    
+    with tab1:
+        # Filters
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            # Branch filter
+            with engine.connect() as conn:
+                result = conn.execute(text('''
+                SELECT id, branch_name FROM branches 
+                WHERE company_id = :company_id
+                ORDER BY branch_name
+                '''), {'company_id': company_id})
+                branches = result.fetchall()
+            
+            branch_options = ["All Branches"] + [branch[1] for branch in branches]
+            branch_filter = st.selectbox("Select Branch", branch_options, key="task_branch_filter")
+            
+            # If branch selected, get employees
+            if branch_filter != "All Branches":
+                selected_branch_id = next(branch[0] for branch in branches if branch[1] == branch_filter)
+                
+                with engine.connect() as conn:
+                    result = conn.execute(text('''
+                    SELECT id, full_name FROM employees 
+                    WHERE branch_id = :branch_id AND is_active = TRUE
+                    ORDER BY full_name
+                    '''), {'branch_id': selected_branch_id})
+                    employees = result.fetchall()
+                
+                employee_options = ["All Employees"] + [emp[1] for emp in employees]
+                employee_filter = st.selectbox("Select Employee", employee_options, key="task_employee_filter")
+            else:
+                employee_filter = "All Employees"
+        
+        with col2:
+            # Assignment type filter
+            assignment_options = ["All Tasks", "Branch Tasks", "Individual Tasks"]
+            assignment_filter = st.selectbox("Assignment Type", assignment_options, key="task_assignment_filter")
+        
+        with col3:
+            # Status filter
+            status_options = ["All Tasks", "Pending", "Completed"]
+            status_filter = st.selectbox("Task Status", status_options, key="admin_task_status_filter")
+        
+        # Build query based on filters
+        if branch_filter == "All Branches" and assignment_filter != "Individual Tasks":
+            # Query for all branches including branch assignments
+            query = '''
+            SELECT t.id, t.task_description, t.due_date, t.is_completed, t.created_at, 
+                   b.branch_name, e.full_name as employee_name, t.branch_id, t.employee_id, 
+                   c.full_name as completed_by
+            FROM tasks t
+            LEFT JOIN branches b ON t.branch_id = b.id
+            LEFT JOIN employees e ON t.employee_id = e.id
+            LEFT JOIN employees c ON t.completed_by_id = c.id
+            WHERE b.company_id = :company_id
+            '''
+            params = {'company_id': company_id}
+        elif branch_filter != "All Branches" and assignment_filter != "Individual Tasks":
+            # Query for specific branch including branch assignments
+            query = '''
+            SELECT t.id, t.task_description, t.due_date, t.is_completed, t.created_at, 
+                   b.branch_name, e.full_name as employee_name, t.branch_id, t.employee_id,
+                   c.full_name as completed_by
+            FROM tasks t
+            LEFT JOIN branches b ON t.branch_id = b.id
+            LEFT JOIN employees e ON t.employee_id = e.id
+            LEFT JOIN employees c ON t.completed_by_id = c.id
+            WHERE b.branch_name = :branch_name AND b.company_id = :company_id
+            '''
+            params = {'branch_name': branch_filter, 'company_id': company_id}
+        elif assignment_filter == "Branch Tasks":
+            # Only branch tasks
+            query = '''
+            SELECT t.id, t.task_description, t.due_date, t.is_completed, t.created_at, 
+                   b.branch_name, NULL as employee_name, t.branch_id, t.employee_id,
+                   c.full_name as completed_by
+            FROM tasks t
+            JOIN branches b ON t.branch_id = b.id
+            LEFT JOIN employees c ON t.completed_by_id = c.id
+            WHERE b.company_id = :company_id AND t.employee_id IS NULL
+            '''
+            params = {'company_id': company_id}
+            
+            if branch_filter != "All Branches":
+                query += ' AND b.branch_name = :branch_name'
+                params['branch_name'] = branch_filter
+        else:
+            # Individual employee tasks
+            query = '''
+            SELECT t.id, t.task_description, t.due_date, t.is_completed, t.created_at, 
+                   b.branch_name, e.full_name as employee_name, t.branch_id, t.employee_id,
+                   c.full_name as completed_by
+            FROM tasks t
+            JOIN employees e ON t.employee_id = e.id
+            JOIN branches b ON e.branch_id = b.id
+            LEFT JOIN employees c ON t.completed_by_id = c.id
+            WHERE b.company_id = :company_id
+            '''
+            params = {'company_id': company_id}
+            
+            if branch_filter != "All Branches":
+                query += ' AND b.branch_name = :branch_name'
+                params['branch_name'] = branch_filter
+                
+                if employee_filter != "All Employees":
+                    query += ' AND e.full_name = :employee_name'
+                    params['employee_name'] = employee_filter
+        
+        # Add status filter
+        if status_filter == "Pending":
+            query += ' AND t.is_completed = FALSE'
+        elif status_filter == "Completed":
+            query += ' AND t.is_completed = TRUE'
+        
+        query += ' ORDER BY t.due_date ASC NULLS LAST, t.created_at DESC'
+        
+        # Execute query
+        with engine.connect() as conn:
+            result = conn.execute(text(query), params)
+            tasks = result.fetchall()
+        
+        # Display tasks
+        if not tasks:
+            st.info("No tasks found for the selected criteria")
+        else:
+            st.write(f"Found {len(tasks)} tasks")
+            
+            # Group tasks by branch
+            tasks_by_branch = {}
+            for task in tasks:
+                branch_name = task[5] if task[5] else "Unassigned"
+                
+                if branch_name not in tasks_by_branch:
+                    tasks_by_branch[branch_name] = []
+                
+                tasks_by_branch[branch_name].append(task)
+            
+            # Display tasks by branch
+            for branch_name, branch_tasks in tasks_by_branch.items():
+                with st.expander(f"Tasks for {branch_name} ({len(branch_tasks)})", expanded=True):
+                    for task in branch_tasks:
+                        task_id = task[0]
+                        task_description = task[1]
+                        due_date = task[2].strftime('%d %b, %Y') if task[2] else "No due date"
+                        is_completed = task[3]
+                        created_at = task[4].strftime('%d %b, %Y')
+                        employee_name = task[6] if task[6] else "Entire Branch"
+                        branch_id = task[7]
+                        employee_id = task[8]
+                        completed_by = task[9] if task[9] else ""
+                        
+                        # Display task type and assignee
+                        task_type = "Branch Task" if employee_name == "Entire Branch" else "Individual Task"
+                        assignee = branch_name if employee_name == "Entire Branch" else employee_name
+                        
+                        # Display the task with status-based styling
+                        status_class = "completed" if is_completed else ""
+                        completion_info = f"<br><span style='color: #777;'>Completed by: {completed_by}</span>" if is_completed and completed_by else ""
+                        
+                        st.markdown(f'''
+                        <div class="task-item {status_class}">
+                            <strong>{task_type} for {assignee}</strong> - Due: {due_date}
+                            <p>{task_description}</p>
+                            <div style="display: flex; justify-content: space-between; align-items: center;">
+                                <span style="color: #777; font-size: 0.8rem;">Created: {created_at}</span>
+                                <span style="font-weight: 600; color: {'#9e9e9e' if is_completed else '#4CAF50'};">
+                                    {"Completed" if is_completed else "Pending"}
+                                </span>
+                            </div>
+                            {completion_info}
+                        </div>
+                        ''', unsafe_allow_html=True)
+                        
+                        # Action buttons
+                        if not is_completed:
+                            # For branch tasks, check completion status of all employees
+                            if employee_name == "Entire Branch":
+                                with engine.connect() as conn:
+                                    result = conn.execute(text('''
+                                    SELECT COUNT(*) FROM task_assignments
+                                    WHERE task_id = :task_id AND is_completed = FALSE
+                                    '''), {'task_id': task_id})
+                                    incomplete_count = result.fetchone()[0]
+                                
+                                if incomplete_count > 0:
+                                    st.info(f"{incomplete_count} employees still need to complete this task")
+                                
+                                # Show completion button for manager override
+                                if st.button(f"Mark as Completed (Override)", key=f"complete_override_{task_id}"):
+                                    with engine.connect() as conn:
+                                        # Get manager ID (using company user as override)
+                                        conn.execute(text('''
+                                        UPDATE tasks 
+                                        SET is_completed = TRUE, completed_by_id = :company_id 
+                                        WHERE id = :id
+                                        '''), {'id': task_id, 'company_id': company_id})
+                                        
+                                        # Mark all assignments as completed
+                                        conn.execute(text('''
+                                        UPDATE task_assignments 
+                                        SET is_completed = TRUE, completed_at = CURRENT_TIMESTAMP 
+                                        WHERE task_id = :task_id
+                                        '''), {'task_id': task_id})
+                                        
+                                        conn.commit()
+                                    st.success("Task marked as completed (managerial override)")
+                                    st.rerun()
+                            else:
+                                # Individual task
+                                if st.button(f"Mark as Completed", key=f"complete_task_{task_id}"):
+                                    with engine.connect() as conn:
+                                        conn.execute(text('''
+                                        UPDATE tasks 
+                                        SET is_completed = TRUE, completed_by_id = :company_id 
+                                        WHERE id = :id
+                                        '''), {'id': task_id, 'company_id': company_id})
+                                        conn.commit()
+                                    st.success("Task marked as completed")
+                                    st.rerun()
+                        else:
+                            # Reopen completed task
+                            if st.button(f"Reopen Task", key=f"reopen_{task_id}"):
+                                with engine.connect() as conn:
+                                    conn.execute(text('''
+                                    UPDATE tasks 
+                                    SET is_completed = FALSE, completed_by_id = NULL 
+                                    WHERE id = :id
+                                    '''), {'id': task_id})
+                                    
+                                    # If it's a branch task, also reopen the assignments
+                                    if employee_name == "Entire Branch":
+                                        conn.execute(text('''
+                                        UPDATE task_assignments 
+                                        SET is_completed = FALSE, completed_at = NULL
+                                        WHERE task_id = :task_id
+                                        '''), {'task_id': task_id})
+                                    
+                                    conn.commit()
+                                st.success("Task reopened")
+                                st.rerun()
+                        
+                        if st.button(f"Delete Task", key=f"delete_{task_id}"):
+                            with engine.connect() as conn:
+                                # Delete task assignments first
+                                conn.execute(text('DELETE FROM task_assignments WHERE task_id = :id'), {'id': task_id})
+                                # Then delete the task
+                                conn.execute(text('DELETE FROM tasks WHERE id = :id'), {'id': task_id})
+                                conn.commit()
+                            st.success("Task deleted")
+                            st.rerun()
+    
+    with tab2:
+        # Form to assign new task
+        with st.form("assign_task_form"):
+            # Task assignment type
+            assignment_type = st.radio("Assign Task To:", ["Branch", "Individual Employee"])
+            
+            if assignment_type == "Branch":
+                # Branch selection for branch tasks
+                with engine.connect() as conn:
+                    result = conn.execute(text('''
+                    SELECT id, branch_name FROM branches 
+                    WHERE company_id = :company_id AND is_active = TRUE
+                    ORDER BY branch_name
+                    '''), {'company_id': company_id})
+                    branches = result.fetchall()
+                
+                if not branches:
+                    st.error("No active branches available")
+                    st.stop()
+                
+                branch_id = st.selectbox("Assign to Branch", 
+                                options=[b[0] for b in branches],
+                                format_func=lambda x: next(b[1] for b in branches if b[0] == x))
+                
+                employee_id = None
+            else:
+                # Branch selection first to filter employees
+                with engine.connect() as conn:
+                    result = conn.execute(text('''
+                    SELECT id, branch_name FROM branches 
+                    WHERE company_id = :company_id AND is_active = TRUE
+                    ORDER BY branch_name
+                    '''), {'company_id': company_id})
+                    branches = result.fetchall()
+                
+                if not branches:
+                    st.error("No active branches available")
+                    st.stop()
+                
+                branch_id_for_emp = st.selectbox("Employee's Branch", 
+                                       options=[b[0] for b in branches],
+                                       format_func=lambda x: next(b[1] for b in branches if b[0] == x))
+                
+                # Then employee selection
+                with engine.connect() as conn:
+                    result = conn.execute(text('''
+                    SELECT id, full_name, role FROM employees 
+                    WHERE branch_id = :branch_id AND is_active = TRUE
+                    ORDER BY role, full_name
+                    '''), {'branch_id': branch_id_for_emp})
+                    employees = result.fetchall()
+                
+                if not employees:
+                    st.error(f"No active employees in the selected branch")
+                    st.stop()
+                
+                employee_id = st.selectbox("Assign to Employee", 
+                                    options=[e[0] for e in employees],
+                                    format_func=lambda x: f"{next(e[1] for e in employees if e[0] == x)} ({next(e[2] for e in employees if e[0] == x)})")
+                
+                branch_id = None
+            
+            # Task details
+            task_description = st.text_area("Task Description")
+            due_date = st.date_input("Due Date", datetime.date.today() + datetime.timedelta(days=7))
+            
+            submitted = st.form_submit_button("Assign Task")
+            if submitted:
+                if not task_description:
+                    st.error("Please enter a task description")
+                else:
+                    # Insert new task
+                    try:
+                        with engine.connect() as conn:
+                            # Begin transaction
+                            if assignment_type == "Branch":
+                                # Create branch task
+                                result = conn.execute(text('''
+                                INSERT INTO tasks (branch_id, task_description, due_date, is_completed)
+                                VALUES (:branch_id, :task_description, :due_date, FALSE)
+                                RETURNING id
+                                '''), {
+                                    'branch_id': branch_id,
+                                    'task_description': task_description,
+                                    'due_date': due_date
+                                })
+                                task_id = result.fetchone()[0]
+                                
+                                # Create task assignments for all active employees in the branch
+                                employee_ids = conn.execute(text('''
+                                SELECT id FROM employees
+                                WHERE branch_id = :branch_id AND is_active = TRUE
+                                '''), {'branch_id': branch_id}).fetchall()
+                                
+                                for emp_id in employee_ids:
+                                    conn.execute(text('''
+                                    INSERT INTO task_assignments (task_id, employee_id, is_completed)
+                                    VALUES (:task_id, :employee_id, FALSE)
+                                    '''), {'task_id': task_id, 'employee_id': emp_id[0]})
+                                
+                                branch_name = next(b[1] for b in branches if b[0] == branch_id)
+                                success_message = f"Task assigned to {branch_name} branch ({len(employee_ids)} employees)"
+                            else:
+                                # Create individual task
+                                conn.execute(text('''
+                                INSERT INTO tasks (employee_id, task_description, due_date, is_completed)
+                                VALUES (:employee_id, :task_description, :due_date, FALSE)
+                                '''), {
+                                    'employee_id': employee_id,
+                                    'task_description': task_description,
+                                    'due_date': due_date
+                                })
+                                
+                                employee_name = next(e[1] for e in employees if e[0] == employee_id)
+                                success_message = f"Task assigned to {employee_name}"
+                            
+                            conn.commit()
+                        st.success(success_message)
+                    except Exception as e:
+                        st.error(f"Error assigning task: {e}")
 
 # Main function
 def main():
