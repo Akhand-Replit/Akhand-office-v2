@@ -837,44 +837,43 @@ def manage_messages():
     tab1, tab2 = st.tabs(["Send New Message", "Message History"])
     
     with tab1:
-        # Form to send a message to a company
-        with st.form("send_message_form"):
-            # Select company
-            with engine.connect() as conn:
-                result = conn.execute(text('''
-                SELECT id, company_name FROM companies 
-                WHERE is_active = TRUE
-                ORDER BY company_name
-                '''))
-                companies = result.fetchall()
-            
-            if not companies:
-                st.info("No active companies available to message")
-                st.stop()
-            
-            company_id = st.selectbox("Select Company", 
-                               options=[c[0] for c in companies],
-                               format_func=lambda x: next(c[1] for c in companies if c[0] == x))
-            
-            message_text = st.text_area("Message", height=150)
-            
-            submitted = st.form_submit_button("Send Message")
-            if submitted:
-                if not message_text:
-                    st.error("Please enter a message")
-                else:
-                    with engine.connect() as conn:
-                        conn.execute(text('''
-                        INSERT INTO company_messages (company_id, message_text)
-                        VALUES (:company_id, :message_text)
-                        '''), {
-                            'company_id': company_id,
-                            'message_text': message_text
-                        })
-                        conn.commit()
-                    
-                    company_name = next(c[1] for c in companies if c[0] == company_id)
-                    st.success(f"Message sent to {company_name}")
+        # First check if any active companies exist
+        with engine.connect() as conn:
+            result = conn.execute(text('''
+            SELECT id, company_name FROM companies 
+            WHERE is_active = TRUE
+            ORDER BY company_name
+            '''))
+            companies = result.fetchall()
+        
+        if not companies:
+            st.info("No active companies available to message")
+        else:
+            # Form to send a message to a company
+            with st.form("send_message_form"):
+                company_id = st.selectbox("Select Company", 
+                                   options=[c[0] for c in companies],
+                                   format_func=lambda x: next(c[1] for c in companies if c[0] == x))
+                
+                message_text = st.text_area("Message", height=150)
+                
+                submitted = st.form_submit_button("Send Message")
+                if submitted:
+                    if not message_text:
+                        st.error("Please enter a message")
+                    else:
+                        with engine.connect() as conn:
+                            conn.execute(text('''
+                            INSERT INTO company_messages (company_id, message_text)
+                            VALUES (:company_id, :message_text)
+                            '''), {
+                                'company_id': company_id,
+                                'message_text': message_text
+                            })
+                            conn.commit()
+                        
+                        company_name = next(c[1] for c in companies if c[0] == company_id)
+                        st.success(f"Message sent to {company_name}")
     
     with tab2:
         # Display message history
