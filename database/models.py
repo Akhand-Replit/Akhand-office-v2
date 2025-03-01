@@ -1,5 +1,210 @@
 from sqlalchemy import text
 
+class CompanyModel:
+    """Company data operations"""
+    
+    @staticmethod
+    def get_all_companies(conn):
+        """Get all companies from the database."""
+        result = conn.execute(text('''
+        SELECT id, company_name, username, profile_pic_url, is_active, created_at 
+        FROM companies
+        ORDER BY company_name
+        '''))
+        return result.fetchall()
+    
+    @staticmethod
+    def get_active_companies(conn):
+        """Get all active companies."""
+        result = conn.execute(text('''
+        SELECT id, company_name FROM companies 
+        WHERE is_active = TRUE
+        ORDER BY company_name
+        '''))
+        return result.fetchall()
+    
+    @staticmethod
+    def get_company_by_id(conn, company_id):
+        """Get company data by ID."""
+        result = conn.execute(text('''
+        SELECT company_name, username, profile_pic_url, is_active
+        FROM companies
+        WHERE id = :company_id
+        '''), {'company_id': company_id})
+        return result.fetchone()
+    
+    @staticmethod
+    def add_company(conn, company_name, username, password, profile_pic_url):
+        """Add a new company to the database."""
+        default_pic = "https://www.gravatar.com/avatar/00000000000000000000000000000000?d=mp&f=y"
+        
+        conn.execute(text('''
+        INSERT INTO companies (company_name, username, password, profile_pic_url, is_active)
+        VALUES (:company_name, :username, :password, :profile_pic_url, TRUE)
+        '''), {
+            'company_name': company_name,
+            'username': username,
+            'password': password,
+            'profile_pic_url': profile_pic_url if profile_pic_url else default_pic
+        })
+        conn.commit()
+    
+    @staticmethod
+    def update_company_status(conn, company_id, is_active):
+        """Activate or deactivate a company and all its branches and employees."""
+        # Update company status
+        conn.execute(text('UPDATE companies SET is_active = :is_active WHERE id = :id'), 
+                    {'id': company_id, 'is_active': is_active})
+        
+        # Update all branches for this company
+        conn.execute(text('''
+        UPDATE branches 
+        SET is_active = :is_active 
+        WHERE company_id = :company_id
+        '''), {'company_id': company_id, 'is_active': is_active})
+        
+        # Update all employees in all branches of this company
+        conn.execute(text('''
+        UPDATE employees 
+        SET is_active = :is_active 
+        WHERE branch_id IN (SELECT id FROM branches WHERE company_id = :company_id)
+        '''), {'company_id': company_id, 'is_active': is_active})
+        
+        conn.commit()
+    
+    @staticmethod
+    def reset_password(conn, company_id, new_password):
+        """Reset a company's password."""
+        conn.execute(text('UPDATE companies SET password = :password WHERE id = :id'), 
+                    {'id': company_id, 'password': new_password})
+        conn.commit()
+    
+    @staticmethod
+    def update_profile(conn, company_id, company_name, profile_pic_url):
+        """Update company profile information."""
+        conn.execute(text('''
+        UPDATE companies
+        SET company_name = :company_name, profile_pic_url = :profile_pic_url
+        WHERE id = :company_id
+        '''), {
+            'company_name': company_name,
+            'profile_pic_url': profile_pic_url,
+            'company_id': company_id
+        })
+        conn.commit()
+    
+    @staticmethod
+    def verify_password(conn, company_id, current_password):
+        """Verify company's current password."""
+        result = conn.execute(text('''
+        SELECT COUNT(*)
+        FROM companies
+        WHERE id = :company_id AND password = :current_password
+        '''), {'company_id': company_id, 'current_password': current_password})
+        return result.fetchone()[0] > 0
+
+
+class BranchModel:
+    """Branch data operations"""
+    
+    @staticmethod
+    def get_all_branches(conn):
+        """Get all branches with company information."""
+        result = conn.execute(text('''
+        SELECT b.id, b.branch_name, b.location, b.branch_head, b.is_active, 
+               c.company_name, c.id as company_id
+        FROM branches b
+        JOIN companies c ON b.company_id = c.id
+        ORDER BY c.company_name, b.branch_name
+        '''))
+        return result.fetchall()
+    
+    @staticmethod
+    def get_company_branches(conn, company_id):
+        """Get all branches for a specific company."""
+        result = conn.execute(text('''
+        SELECT id, branch_name, location, branch_head, is_active
+        FROM branches
+        WHERE company_id = :company_id
+        ORDER BY branch_name
+        '''), {'company_id': company_id})
+        return result.fetchall()
+    
+    @staticmethod
+    def get_active_branches(conn, company_id=None):
+        """Get all active branches, optionally filtered by company."""
+        query = '''
+        SELECT b.id, b.branch_name, c.company_name
+        FROM branches b
+        JOIN companies c ON b.company_id = c.id
+        WHERE b.is_active = TRUE AND c.is_active = TRUE
+        '''
+        
+        params = {}
+        if company_id:
+            query += ' AND b.company_id = :company_id'
+            params = {'company_id': company_id}
+        
+        query += ' ORDER BY c.company_name, b.branch_name'
+        
+        result = conn.execute(text(query), params)
+        return result.fetchall()
+
+
+class MessageModel:
+    """Message data operations"""
+    
+    @staticmethod
+    def send_message(conn, sender_type, sender_id, receiver_type, receiver_id, message_text):
+        """Send a new message."""
+        conn.execute(text('''
+        INSERT INTO messages 
+        (sender_type, sender_id, receiver_type, receiver_id, message_text, is_read)
+        VALUES (:sender_type, :sender_id, :receiver_type, :receiver_id, :message_text, FALSE)
+        '''), {
+            'sender_type': sender_type,
+            'sender_id': sender_id,
+            'receiver_type': receiver_type,
+            'receiver_id': receiver_id,
+            'message_text': message_text
+        })
+        conn.commit()
+    
+    @staticmethod
+    def mark_as_read(conn, message_id):
+        """Mark a message as read."""
+        conn.execute(text('UPDATE messages SET is_read = TRUE WHERE id = :id'), 
+                    {'id': message_id})
+        conn.commit()
+    
+    @staticmethod
+    def get_messages_for_admin(conn):
+        """Get all messages for admin."""
+        result = conn.execute(text('''
+        SELECT m.id, m.sender_type, m.sender_id, m.message_text, m.is_read, m.created_at,
+               CASE WHEN m.sender_type = 'company' THEN c.company_name ELSE 'Admin' END as sender_name
+        FROM messages m
+        LEFT JOIN companies c ON m.sender_type = 'company' AND m.sender_id = c.id
+        WHERE m.receiver_type = 'admin'
+        ORDER BY m.created_at DESC
+        '''))
+        return result.fetchall()
+    
+    @staticmethod
+    def get_messages_for_company(conn, company_id):
+        """Get all messages for a specific company."""
+        result = conn.execute(text('''
+        SELECT m.id, m.sender_type, m.sender_id, m.message_text, m.is_read, m.created_at,
+               CASE WHEN m.sender_type = 'admin' THEN 'Admin' ELSE c.company_name END as sender_name
+        FROM messages m
+        LEFT JOIN companies c ON m.sender_type = 'company' AND m.sender_id = c.id
+        WHERE (m.receiver_type = 'company' AND m.receiver_id = :company_id)
+           OR (m.sender_type = 'company' AND m.sender_id = :company_id)
+        ORDER BY m.created_at DESC
+        '''), {'company_id': company_id})
+        return result.fetchall()
+
+
 class EmployeeModel:
     """Employee data operations"""
     
@@ -7,20 +212,38 @@ class EmployeeModel:
     def get_all_employees(conn):
         """Get all employees from the database."""
         result = conn.execute(text('''
-        SELECT id, username, full_name, profile_pic_url, is_active 
-        FROM employees
-        WHERE id != 1
-        ORDER BY full_name
+        SELECT e.id, e.username, e.full_name, e.profile_pic_url, e.is_active,
+               b.branch_name, c.company_name
+        FROM employees e
+        JOIN branches b ON e.branch_id = b.id
+        JOIN companies c ON b.company_id = c.id
+        ORDER BY c.company_name, b.branch_name, e.full_name
         '''))
+        return result.fetchall()
+    
+    @staticmethod
+    def get_branch_employees(conn, branch_id):
+        """Get all employees for a specific branch."""
+        result = conn.execute(text('''
+        SELECT id, username, full_name, profile_pic_url, is_active
+        FROM employees
+        WHERE branch_id = :branch_id
+        ORDER BY full_name
+        '''), {'branch_id': branch_id})
         return result.fetchall()
     
     @staticmethod
     def get_active_employees(conn):
         """Get all active employees."""
         result = conn.execute(text('''
-        SELECT id, full_name FROM employees 
-        WHERE is_active = TRUE AND id != 1
-        ORDER BY full_name
+        SELECT e.id, e.full_name, b.branch_name, c.company_name
+        FROM employees e
+        JOIN branches b ON e.branch_id = b.id
+        JOIN companies c ON b.company_id = c.id
+        WHERE e.is_active = TRUE 
+          AND b.is_active = TRUE
+          AND c.is_active = TRUE
+        ORDER BY e.full_name
         '''))
         return result.fetchall()
     
@@ -35,14 +258,15 @@ class EmployeeModel:
         return result.fetchone()
     
     @staticmethod
-    def add_employee(conn, username, password, full_name, profile_pic_url):
+    def add_employee(conn, branch_id, username, password, full_name, profile_pic_url):
         """Add a new employee to the database."""
         default_pic = "https://www.gravatar.com/avatar/00000000000000000000000000000000?d=mp&f=y"
         
         conn.execute(text('''
-        INSERT INTO employees (username, password, full_name, profile_pic_url, is_active)
-        VALUES (:username, :password, :full_name, :profile_pic_url, TRUE)
+        INSERT INTO employees (branch_id, username, password, full_name, profile_pic_url, is_active)
+        VALUES (:branch_id, :username, :password, :full_name, :profile_pic_url, TRUE)
         '''), {
+            'branch_id': branch_id,
             'username': username,
             'password': password,
             'full_name': full_name,
@@ -76,16 +300,6 @@ class EmployeeModel:
             'profile_pic_url': profile_pic_url,
             'employee_id': employee_id
         })
-        conn.commit()
-    
-    @staticmethod
-    def update_password(conn, employee_id, new_password):
-        """Update employee password."""
-        conn.execute(text('''
-        UPDATE employees
-        SET password = :new_password
-        WHERE id = :employee_id
-        '''), {'new_password': new_password, 'employee_id': employee_id})
         conn.commit()
     
     @staticmethod
