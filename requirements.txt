@@ -1,0 +1,10 @@
+streamlit
+pandas
+sqlalchemy
+psycopg2-binary
+pillow
+streamlit-option-menu
+plotly
+reportlab
+requests
+python-dotenv
