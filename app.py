@@ -1003,8 +1003,8 @@ def company_dashboard():
     # Navigation
     selected = option_menu(
         menu_title=None,
-        options=["Dashboard", "Branches", "Employees", "Tasks", "Task Tracking", "Reports", "Messages", "Profile", "Logout"],
-        icons=["house", "building", "people", "list-task", "kanban", "clipboard-data", "envelope", "person-circle", "box-arrow-right"],
+        options=["Dashboard", "Branches", "Employees", "Tasks", "Reports", "Messages", "Profile", "Logout"],
+        icons=["house", "building", "people", "list-task", "clipboard-data", "envelope", "person-circle", "box-arrow-right"],
         menu_icon="cast",
         default_index=0,
         orientation="horizontal",
@@ -1024,8 +1024,6 @@ def company_dashboard():
         manage_company_employees()
     elif selected == "Tasks":
         manage_company_tasks()
-    elif selected == "Task Tracking":
-        view_task_tracking()
     elif selected == "Reports":
         view_company_reports()
     elif selected == "Messages":
