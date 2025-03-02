@@ -1,6 +1,6 @@
 import streamlit as st
 from sqlalchemy import text
-from database.models.branch_model import BranchModel
+from database.models import BranchModel
 
 def manage_branches(engine):
     """Manage branches including sub-branches.
