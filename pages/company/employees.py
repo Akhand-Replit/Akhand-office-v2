@@ -1,8 +1,6 @@
 import streamlit as st
 from sqlalchemy import text
-from database.models.employee_model import EmployeeModel
-from database.models.branch_model import BranchModel
-from database.models.role_model import RoleModel
+from database.models import EmployeeModel, BranchModel, RoleModel
 
 def manage_employees(engine):
     """Manage employees with role assignment and branch transfers.
