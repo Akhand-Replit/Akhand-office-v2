@@ -1,7 +1,7 @@
 import streamlit as st
 import datetime
 from database.models import ReportModel, EmployeeModel
-from utils.pdf_generator import create_report_pdf
+from utils.pdf_generator import create_employee_report_pdf
 from utils.helpers import get_date_range_from_filter
 
 def view_all_reports(engine):
@@ -47,7 +47,7 @@ def view_all_reports(engine):
     
     # Fetch reports based on filters
     with engine.connect() as conn:
-        reports = ReportModel.get_all_reports(conn, start_date, end_date, employee_filter)
+        reports = ReportModel.get_all_reports(conn, start_date, end_date, employee_name=employee_filter)
     
     # Display reports
     if not reports:
@@ -67,7 +67,7 @@ def view_all_reports(engine):
         with col2:
             if employee_filter != "All Employees" and len(employee_reports) == 1:
                 if st.button("Export as PDF"):
-                    pdf = create_report_pdf(reports)
+                    pdf = create_employee_report_pdf(reports, employee_filter)
                     st.download_button(
                         label="Download PDF",
                         data=pdf,
@@ -75,7 +75,7 @@ def view_all_reports(engine):
                         mime="application/pdf"
                     )
         
-        # Display reports by employee
+        # Display reports
         for employee_name, emp_reports in employee_reports.items():
             with st.expander(f"Reports by {employee_name} ({len(emp_reports)})", expanded=True):
                 # Group by month/year for better organization
