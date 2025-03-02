@@ -161,17 +161,26 @@ def display_company_dashboard_overview(engine):
     st.subheader("Employee Statistics")
     
     # First row: Total employees and by role
-    cols = st.columns(len(employees_by_role) + 1)
+    cols = st.columns(min(len(employees_by_role) + 1, 4))  # Limit to 4 columns max
     
     with cols[0]:
         display_stats_card(total_employees, "Total Employees")
     
-    # Display employees by role
-    for i, role_stat in enumerate(employees_by_role):
-        with cols[i + 1]:
-            display_stats_card(role_stat[1], f"{role_stat[0]}s")
+    # Display employees by role (up to 3 roles in first row)
+    for i, role_stat in enumerate(employees_by_role[:3]):
+        if i + 1 < len(cols):
+            with cols[i + 1]:
+                display_stats_card(role_stat[1], f"{role_stat[0]}s")
     
-    # Second row: Task and message stats
+    # If more than 3 roles, add another row
+    if len(employees_by_role) > 3:
+        remaining_cols = st.columns(min(len(employees_by_role) - 3, 4))
+        for i, role_stat in enumerate(employees_by_role[3:]):
+            if i < len(remaining_cols):
+                with remaining_cols[i]:
+                    display_stats_card(role_stat[1], f"{role_stat[0]}s")
+    
+    # Task and message stats
     col1, col2, col3 = st.columns(3)
     
     with col1:
