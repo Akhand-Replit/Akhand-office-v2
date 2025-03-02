@@ -48,13 +48,16 @@ def authenticate(engine, username, password):
             "profile_pic_url": company[3]
         }
     
-    # If not company, check employee credentials
+    # If not company, check employee credentials with role information
     with engine.connect() as conn:
         result = conn.execute(text('''
-        SELECT e.id, e.username, e.full_name, e.profile_pic_url, b.id as branch_id, b.branch_name, c.id as company_id, c.company_name
+        SELECT e.id, e.username, e.full_name, e.profile_pic_url, 
+               b.id as branch_id, b.branch_name, c.id as company_id, c.company_name,
+               r.id as role_id, r.role_name, r.role_level
         FROM employees e
         JOIN branches b ON e.branch_id = b.id
         JOIN companies c ON b.company_id = c.id
+        JOIN employee_roles r ON e.role_id = r.id
         WHERE e.username = :username AND e.password = :password 
           AND e.is_active = TRUE AND b.is_active = TRUE AND c.is_active = TRUE
         '''), {'username': username, 'password': password})
@@ -70,7 +73,10 @@ def authenticate(engine, username, password):
             "branch_id": employee[4],
             "branch_name": employee[5],
             "company_id": employee[6],
-            "company_name": employee[7]
+            "company_name": employee[7],
+            "role_id": employee[8],
+            "role_name": employee[9],
+            "role_level": employee[10]
         }
     
     return None
