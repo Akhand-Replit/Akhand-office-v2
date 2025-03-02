@@ -134,5 +134,12 @@ def init_db(engine):
         WHERE NOT EXISTS (
             SELECT 1 FROM employee_roles WHERE role_name = 'General Employee' AND company_id = companies.id
         );
+        
+        -- Set existing employees to General Employee role by default
+        UPDATE employees e
+        SET role_id = r.id
+        FROM employee_roles r
+        JOIN branches b ON r.company_id = b.company_id
+        WHERE e.branch_id = b.id AND r.role_name = 'General Employee' AND e.role_id IS NULL;
         '''))
         conn.commit()
