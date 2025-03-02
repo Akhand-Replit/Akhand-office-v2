@@ -4,7 +4,10 @@ from database.connection import init_connection, init_db
 from pages.login.login_page import display_login
 from pages.admin.dashboard import admin_dashboard
 from pages.company.dashboard import company_dashboard
-from pages.employee.dashboard import employee_dashboard
+
+def logout():
+    st.session_state.pop("user", None)
+    st.rerun()
 
 def main():
     """Main application entry point"""
@@ -30,12 +33,13 @@ def main():
             elif user_type == "company":
                 company_dashboard(engine)
             elif user_type == "employee":
+                # Use the new role-based employee dashboard
+                from pages.employee.dashboard import employee_dashboard
                 employee_dashboard(engine)
             else:
                 st.error("Invalid user type. Please log out and try again.")
                 if st.button("Logout"):
-                    st.session_state.pop("user", None)
-                    st.rerun()
+                    logout()
     else:
         st.error("Failed to connect to the database. Please check your database configuration.")
 
